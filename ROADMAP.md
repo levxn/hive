@@ -64,10 +64,6 @@ timeline
     - [ ] Quick start guide
     - [ ] Goal creation guide
     - [ ] Agent creation guide
-    - [ ] Static GitHub Page setup
-- [ ] **Assets**
-    - [ ] README with examples
-    - [ ] Contributing guidelines
 - [ ] **Distribution**
     - [ ] PyPI package
     - [ ] Docker image on Docker Hub
@@ -122,6 +118,8 @@ timeline
 
 ### Developer Experience Enhancement
 - [ ] Detailed Tool usage documentation
+- [ ] Recipe for common agent use cases
+- [ ] Discord Support Channel
 
 ### More Agent Templates
 - [ ] GTM Sales Agent (workflow)
