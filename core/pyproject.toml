@@ -16,7 +16,13 @@ dependencies = [
   "pytest-xdist>=3.0",
 ]
 
-# [project.optional-dependencies]
+[project.optional-dependencies]
+memory = [
+  "sentence-transformers>=2.2.0",
+  "numpy>=1.24.0",
+  "chromadb>=0.4.0",
+]
+
 
 [project.scripts]
 hive = "framework.cli:main"
