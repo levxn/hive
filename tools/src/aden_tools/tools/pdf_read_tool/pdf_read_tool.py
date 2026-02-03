@@ -92,6 +92,7 @@ def register_tools(mcp: FastMCP) -> None:
         pages: str | None = None,
         max_pages: int = 100,
         include_metadata: bool = True,
+        password: str | None = None,
     ) -> dict:
         """
         Read and extract text content from a PDF file.
@@ -105,6 +106,7 @@ def register_tools(mcp: FastMCP) -> None:
                 '1-10' for range, '1,3,5' for specific
             max_pages: Maximum number of pages to process (1-1000, memory safety)
             include_metadata: Include PDF metadata (author, title, creation date, etc.)
+            password: Password for encrypted/password-protected PDFs
 
         Returns:
             Dict with extracted text and metadata, or error dict
@@ -132,9 +134,19 @@ def register_tools(mcp: FastMCP) -> None:
             # Open and read PDF
             reader = PdfReader(path)
 
-            # Check for encryption
+            # Check for encryption and attempt decryption
             if reader.is_encrypted:
-                return {"error": "Cannot read encrypted PDF. Password required."}
+                if password:
+                    try:
+                        if not reader.decrypt(password):
+                            return {"error": "Incorrect PDF password"}
+                    except Exception as e:
+                        return {"error": f"Failed to decrypt PDF: {str(e)}"}
+                else:
+                    return {
+                        "error": "PDF is encrypted. Provide password parameter.",
+                        "help": "Use password='your_password' to unlock the PDF",
+                    }
 
             total_pages = len(reader.pages)
 

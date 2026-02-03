@@ -124,6 +124,31 @@ class _HubSpotClient:
         )
         return self._handle_response(response)
 
+    def associate_objects(
+        self,
+        from_type: str,
+        from_id: str,
+        to_type: str,
+        to_id: str,
+        association_type_id: int = 1,
+    ) -> dict[str, Any]:
+        """Associate two CRM objects together.
+        
+        Uses HubSpot CRM Associations v4 API.
+        Common association_type_ids:
+            1 = Primary company for contact
+            2 = Contact to company
+            3 = Deal to contact
+            5 = Deal to company
+        """
+        response = httpx.put(
+            f"{HUBSPOT_API_BASE}/crm/v4/objects/{from_type}/{from_id}/associations/{to_type}/{to_id}",
+            headers=self._headers,
+            json=[{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": association_type_id}],
+            timeout=30.0,
+        )
+        return self._handle_response(response)
+
 
 def register_tools(
     mcp: FastMCP,
@@ -471,6 +496,51 @@ def register_tools(
             return client
         try:
             return client.update_object("deals", deal_id, properties)
+        except httpx.TimeoutException:
+            return {"error": "Request timed out"}
+        except httpx.RequestError as e:
+            return {"error": f"Network error: {e}"}
+
+    @mcp.tool()
+    def hubspot_associate_objects(
+        from_type: str,
+        from_id: str,
+        to_type: str,
+        to_id: str,
+        association_type_id: int = 1,
+    ) -> dict:
+        """
+        Associate two HubSpot CRM objects together.
+
+        Use this to link contacts to companies, deals to contacts, etc.
+        This enables proper CRM relationship tracking.
+
+        Args:
+            from_type: Source object type (e.g., "contacts", "deals")
+            from_id: Source object ID
+            to_type: Target object type (e.g., "companies", "contacts")
+            to_id: Target object ID
+            association_type_id: Association type (default 1):
+                1 = Contact to company (primary)
+                2 = Company to contact
+                3 = Deal to contact
+                5 = Deal to company
+
+        Returns:
+            Dict with association result or error
+
+        Examples:
+            # Link contact to company
+            hubspot_associate_objects("contacts", "123", "companies", "456")
+
+            # Link deal to contact
+            hubspot_associate_objects("deals", "789", "contacts", "123", 3)
+        """
+        client = _get_client()
+        if isinstance(client, dict):
+            return client
+        try:
+            return client.associate_objects(from_type, from_id, to_type, to_id, association_type_id)
         except httpx.TimeoutException:
             return {"error": "Request timed out"}
         except httpx.RequestError as e:

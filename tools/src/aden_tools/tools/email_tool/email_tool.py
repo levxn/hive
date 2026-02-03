@@ -33,6 +33,7 @@ def register_tools(
         from_email: str,
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
+        attachments: list[dict] | None = None,
     ) -> dict:
         """Send email using Resend API."""
         resend.api_key = api_key
@@ -47,6 +48,9 @@ def register_tools(
                 payload["cc"] = cc
             if bcc:
                 payload["bcc"] = bcc
+            if attachments:
+                # Resend expects: [{"filename": "...", "content": "base64..."}]
+                payload["attachments"] = attachments
             email = resend.Emails.send(payload)
             return {
                 "success": True,
@@ -93,6 +97,7 @@ def register_tools(
         provider: Literal["auto", "resend"] = "auto",
         cc: str | list[str] | None = None,
         bcc: str | list[str] | None = None,
+        attachments: list[dict] | None = None,
     ) -> dict:
         """Core email sending logic, callable by other tools."""
         from_email = _resolve_from_email(from_email)
@@ -125,13 +130,13 @@ def register_tools(
                         "Get a key at https://resend.com/api-keys",
                     }
                 return _send_via_resend(
-                    creds["resend_api_key"], to_list, subject, html, from_email, cc_list, bcc_list
+                    creds["resend_api_key"], to_list, subject, html, from_email, cc_list, bcc_list, attachments
                 )
 
             # auto
             if resend_available:
                 return _send_via_resend(
-                    creds["resend_api_key"], to_list, subject, html, from_email, cc_list, bcc_list
+                    creds["resend_api_key"], to_list, subject, html, from_email, cc_list, bcc_list, attachments
                 )
 
             return {
@@ -151,9 +156,10 @@ def register_tools(
         provider: Literal["auto", "resend"] = "auto",
         cc: str | list[str] | None = None,
         bcc: str | list[str] | None = None,
+        attachments: list[dict] | None = None,
     ) -> dict:
         """
-        Send an email.
+        Send an email with optional attachments.
 
         Supports multiple email providers:
         - "auto": Tries Resend first (default)
@@ -167,12 +173,15 @@ def register_tools(
             provider: Email provider to use ("auto" or "resend").
             cc: CC recipient(s). Single string or list of strings. Optional.
             bcc: BCC recipient(s). Single string or list of strings. Optional.
+            attachments: List of attachments. Each attachment is a dict with:
+                - filename: str (e.g., "invoice.pdf")
+                - content: str (base64-encoded file content)
 
         Returns:
             Dict with send result including provider used and message ID,
             or error dict with "error" and optional "help" keys.
         """
-        return _send_email_impl(to, subject, html, from_email, provider, cc, bcc)
+        return _send_email_impl(to, subject, html, from_email, provider, cc, bcc, attachments)
 
     @mcp.tool()
     def send_budget_alert_email(
