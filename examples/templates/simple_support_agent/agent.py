@@ -9,40 +9,54 @@ from framework.llm import LiteLLMProvider
 from framework.runner.tool_registry import ToolRegistry
 
 from .config import default_config, metadata
-from .nodes import (    intake_node,    response_node,)
+from .nodes import (
+    intake_node,
+    response_node,
+)
 
 # Goal definition
 goal = Goal(
     id="support_goal",
     name="Customer Support Goal",
     description="Provide helpful responses to customer inquiries",
-    success_criteria=[        SuccessCriterion(
+    success_criteria=[
+        SuccessCriterion(
             metric="response_quality",
             target="completion",
             description="response_quality"
-        ),        SuccessCriterion(
+        ),
+        SuccessCriterion(
             metric="resolution_speed",
             target="completion",
             description="resolution_speed"
-        ),    ],
-    constraints=[    ],
+        ),
+    ],
+    constraints=[
+    ],
 )
 
 # Nodes
-nodes = [    intake_node,    response_node,]
+nodes = [
+    intake_node,
+    response_node,
+]
 
 # Edges
-edges = [    EdgeSpec(
+edges = [
+    EdgeSpec(
         source="intake",
         target="response",
         condition=EdgeCondition.ON_SUCCESS,
-    ),]
+    ),
+]
 
 # Entry point
 entry_node = "intake"
 
 # Terminal nodes
-terminal_nodes = [    "response",]
+terminal_nodes = [
+    "response",
+]
 
 
 class Agent:

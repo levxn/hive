@@ -10,10 +10,8 @@ from framework.runner.tool_registry import ToolRegistry
 
 from .config import default_config, metadata
 from .nodes import (
-{%- for node in nodes %}
-    {{ node.id }}_node,
-{%- endfor %}
-)
+{% for node in nodes %}    {{ node.id }}_node,
+{% endfor %})
 
 # Goal definition
 goal = Goal(
@@ -21,51 +19,41 @@ goal = Goal(
     name="{{ goal.name }}",
     description="{{ goal.description }}",
     success_criteria=[
-{%- for criterion in goal.success_criteria %}
-        SuccessCriterion(
+{% for criterion in goal.success_criteria %}        SuccessCriterion(
             metric="{{ criterion }}",
             target="completion",
             description="{{ criterion }}"
         ),
-{%- endfor %}
-    ],
+{% endfor %}    ],
     constraints=[
-{%- for constraint in goal.constraints %}
-        Constraint(
+{% for constraint in goal.constraints %}        Constraint(
             type="hard",
             description="{{ constraint }}"
         ),
-{%- endfor %}
-    ],
+{% endfor %}    ],
 )
 
 # Nodes
 nodes = [
-{%- for node in nodes %}
-    {{ node.id }}_node,
-{%- endfor %}
-]
+{% for node in nodes %}    {{ node.id }}_node,
+{% endfor %}]
 
 # Edges
 edges = [
-{%- for edge in edges %}
-    EdgeSpec(
+{% for edge in edges %}    EdgeSpec(
         source="{{ edge.source }}",
         target="{{ edge.target }}",
         condition=EdgeCondition.{{ edge.condition.upper() }},
     ),
-{%- endfor %}
-]
+{% endfor %}]
 
 # Entry point
 entry_node = "{{ entry_node }}"
 
 # Terminal nodes
 terminal_nodes = [
-{%- for node_id in terminal_nodes %}
-    "{{ node_id }}",
-{%- endfor %}
-]
+{% for node_id in terminal_nodes %}    "{{ node_id }}",
+{% endfor %}]
 
 
 class Agent:

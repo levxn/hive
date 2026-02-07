@@ -1,6 +1,7 @@
 """Node definitions for simple_support_agent."""
 
 from framework.graph import NodeSpec
+
 # Customer Intake
 intake_node = NodeSpec(
     id="intake",
@@ -10,7 +11,8 @@ intake_node = NodeSpec(
     client_facing=False,
     input_keys=[],
     output_keys=[],
-    system_prompt="""You are a helpful customer support agent. Gather information about the customer's issue.""",)
+    system_prompt="""You are a helpful customer support agent. Gather information about the customer's issue.""",
+)
 # Response Generator
 response_node = NodeSpec(
     id="response",
@@ -20,4 +22,5 @@ response_node = NodeSpec(
     client_facing=False,
     input_keys=[],
     output_keys=[],
-    system_prompt="""You are a helpful customer support agent. Provide a clear, helpful response to the customer.""",)
+    system_prompt="""You are a helpful customer support agent. Provide a clear, helpful response to the customer.""",
+)
