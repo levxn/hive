@@ -1,0 +1,21 @@
+"""Node definitions for {{ agent_name }}."""
+
+from framework.graph import NodeSpec
+
+{%- for node in nodes %}
+
+# {{ node.name }}
+{{ node.id }}_node = NodeSpec(
+    id="{{ node.id }}",
+    name="{{ node.name }}",
+    description="{{ node.description }}",
+    node_type="{{ node.node_type }}",
+    client_facing={{ node.client_facing }},
+    input_keys={{ node.input_keys }},
+    output_keys={{ node.output_keys }},
+    system_prompt="""{{ node.system_prompt }}""",
+{%- if node.tools %}
+    tools={{ node.tools }},
+{%- endif %}
+)
+{%- endfor %}

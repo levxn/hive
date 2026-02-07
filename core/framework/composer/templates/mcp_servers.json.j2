@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+{%- for tool in selected_tools %}
+    "{{ tool }}": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "{{ tool_path }}",
+        "run",
+        "{{ tool }}"
+      ]
+    }{% if not loop.last %},{% endif %}
+{%- endfor %}
+  }
+}
