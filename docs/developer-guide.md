@@ -13,6 +13,7 @@ This guide covers everything you need to know to develop with the Aden Agent Fra
 7. [Git Workflow](#git-workflow)
 8. [Common Tasks](#common-tasks)
 9. [Troubleshooting](#troubleshooting)
+10. [Session Management & Recovery](#session-management--recovery)
 
 ---
 
@@ -660,6 +661,44 @@ echo $ANTHROPIC_API_KEY
 
 # Create .env if needed
 # Then add your API keys
+```
+
+---
+
+## Session Management & Recovery
+
+Hive stores execution state under `~/.hive/agents/{agent_name}/sessions/` and uses
+checkpoints to resume failed or paused runs.
+
+### List sessions
+
+```bash
+hive sessions list exports/my_agent
+```
+
+### Inspect a session
+
+```bash
+hive sessions show exports/my_agent session_20260208_143022_abcd1234
+```
+
+### List checkpoints for a session
+
+```bash
+hive sessions checkpoints exports/my_agent session_20260208_143022_abcd1234
+```
+
+### Resume a session
+
+```bash
+hive resume exports/my_agent session_20260208_143022_abcd1234
+```
+
+### Resume from a specific checkpoint
+
+```bash
+hive resume exports/my_agent session_20260208_143022_abcd1234 \
+  --checkpoint cp_node_complete_worker_20260208_143045
 ```
 
 ---

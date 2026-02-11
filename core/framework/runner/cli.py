@@ -241,6 +241,11 @@ def register_commands(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Show only sessions with checkpoints",
     )
+    sessions_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
+    )
     sessions_list_parser.set_defaults(func=cmd_sessions_list)
 
     # sessions show
@@ -281,6 +286,11 @@ def register_commands(subparsers: argparse._SubParsersAction) -> None:
         "session_id",
         type=str,
         help="Session ID",
+    )
+    sessions_checkpoints_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
     )
     sessions_checkpoints_parser.set_defaults(func=cmd_sessions_checkpoints)
 
@@ -325,11 +335,57 @@ def register_commands(subparsers: argparse._SubParsersAction) -> None:
         help="Specific checkpoint ID to resume from (default: latest)",
     )
     resume_parser.add_argument(
+        "--input",
+        "-i",
+        type=str,
+        help="Input JSON to override the session's original input",
+    )
+    resume_parser.add_argument(
+        "--input-file",
+        "-f",
+        type=str,
+        help="Path to JSON file to override the session's original input",
+    )
+    resume_parser.add_argument(
         "--tui",
         action="store_true",
         help="Resume in TUI dashboard mode",
     )
     resume_parser.set_defaults(func=cmd_resume)
+
+
+def _parse_input_context(args: argparse.Namespace) -> dict:
+    context = {}
+    if getattr(args, "input", None):
+        try:
+            context = json.loads(args.input)
+        except json.JSONDecodeError as e:
+            print(f"Error parsing --input JSON: {e}", file=sys.stderr)
+            raise
+    elif getattr(args, "input_file", None):
+        try:
+            with open(args.input_file) as f:
+                context = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"Error reading input file: {e}", file=sys.stderr)
+            raise
+    return context
+
+
+def _build_resume_session_state(session_state, checkpoint_override: str | None) -> dict:
+    resume_from_checkpoint = checkpoint_override or session_state.latest_checkpoint_id
+    return {
+        "memory": session_state.memory,
+        "paused_at": session_state.progress.paused_at,
+        "resume_from": session_state.progress.resume_from,
+        "resume_from_checkpoint": resume_from_checkpoint,
+    }
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -348,19 +404,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Load input context
     context = {}
-    if args.input:
-        try:
-            context = json.loads(args.input)
-        except json.JSONDecodeError as e:
-            print(f"Error parsing --input JSON: {e}", file=sys.stderr)
-            return 1
-    elif args.input_file:
-        try:
-            with open(args.input_file) as f:
-                context = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"Error reading input file: {e}", file=sys.stderr)
-            return 1
+    try:
+        context = _parse_input_context(args)
+    except Exception:
+        return 1
 
     # Run the agent (with TUI or standard)
     if getattr(args, "tui", False):
@@ -420,6 +467,30 @@ def cmd_run(args: argparse.Namespace) -> int:
         except FileNotFoundError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
+        except Exception as e:
+            print(f"Error loading agent: {e}", file=sys.stderr)
+            return 1
+
+        resume_session_state = None
+        if getattr(args, "resume_session", None):
+            from framework.runner.session_utils import load_session_store
+
+            agent_path = Path(args.agent_path)
+            session_store = load_session_store(agent_path)
+            session_state = asyncio.run(session_store.read_state(args.resume_session))
+            if session_state is None:
+                print(
+                    f"Error: session '{args.resume_session}' not found for {args.agent_path}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            if not context:
+                context = session_state.input_data or {}
+
+            resume_session_state = _build_resume_session_state(
+                session_state, getattr(args, "checkpoint", None)
+            )
 
         # Auto-inject user_id if the agent expects it but it's not provided
         entry_input_keys = runner.graph.nodes[0].input_keys if runner.graph.nodes else []
@@ -440,7 +511,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             print("=" * 60)
             print()
 
-        result = asyncio.run(runner.run(context))
+        result = asyncio.run(runner.run(context, session_state=resume_session_state))
 
     # Format output
     output = {
@@ -1575,30 +1646,208 @@ def _interactive_multi(agents_dir: Path) -> int:
 
 def cmd_sessions_list(args: argparse.Namespace) -> int:
     """List agent sessions."""
-    print("⚠ Sessions list command not yet implemented")
-    print("This will be available once checkpoint infrastructure is complete.")
-    print(f"\nAgent: {args.agent_path}")
-    print(f"Status filter: {args.status}")
-    print(f"Has checkpoints: {args.has_checkpoints}")
-    return 1
+    from framework.runner.session_utils import load_session_store
+
+    agent_path = Path(args.agent_path)
+    session_store = load_session_store(agent_path)
+
+    status = None if args.status == "all" else args.status
+    sessions = asyncio.run(session_store.list_sessions(status=status))
+
+    if args.has_checkpoints:
+        sessions = [
+            s for s in sessions if s.checkpoint_enabled and s.latest_checkpoint_id is not None
+        ]
+
+    if args.json:
+        payload = [s.model_dump() for s in sessions]
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    if not sessions:
+        print("No sessions found.")
+        return 0
+
+    header = [
+        ("SESSION ID", 28),
+        ("STATUS", 10),
+        ("UPDATED AT", 20),
+        ("STEPS", 6),
+        ("RESUMABLE", 10),
+        ("CHECKPOINT", 12),
+        ("ERROR", 40),
+    ]
+    line = " ".join(label.ljust(width) for label, width in header)
+    print(line)
+    print("-" * len(line))
+
+    for session in sessions:
+        has_checkpoint = session.checkpoint_enabled and session.latest_checkpoint_id is not None
+        resumable = session.is_resumable or session.is_resumable_from_checkpoint
+        error = session.result.error or ""
+        row = [
+            _truncate(session.session_id, 28).ljust(28),
+            str(session.status).ljust(10),
+            _truncate(session.timestamps.updated_at, 20).ljust(20),
+            str(session.progress.steps_executed).ljust(6),
+            ("yes" if resumable else "no").ljust(10),
+            ("yes" if has_checkpoint else "no").ljust(12),
+            _truncate(error.replace("\n", " "), 40).ljust(40),
+        ]
+        print(" ".join(row))
+
+    return 0
 
 
 def cmd_sessions_show(args: argparse.Namespace) -> int:
     """Show detailed session information."""
-    print("⚠ Session show command not yet implemented")
-    print("This will be available once checkpoint infrastructure is complete.")
-    print(f"\nAgent: {args.agent_path}")
-    print(f"Session: {args.session_id}")
-    return 1
+    from framework.runner.session_utils import load_session_store
+
+    agent_path = Path(args.agent_path)
+    session_store = load_session_store(agent_path)
+    session_state = asyncio.run(session_store.read_state(args.session_id))
+
+    if session_state is None:
+        print(f"Error: session '{args.session_id}' not found for {args.agent_path}")
+        return 1
+
+    if args.json:
+        print(json.dumps(session_state.model_dump(), indent=2, default=str))
+        return 0
+
+    progress = session_state.progress
+    result = session_state.result
+    timestamps = session_state.timestamps
+
+    print(f"Session: {session_state.session_id}")
+    print(f"Agent ID: {session_state.agent_id or 'unknown'}")
+    print(f"Goal ID: {session_state.goal_id}")
+    print(f"Status: {session_state.status}")
+    print(f"Started: {timestamps.started_at}")
+    print(f"Updated: {timestamps.updated_at}")
+    if timestamps.completed_at:
+        print(f"Completed: {timestamps.completed_at}")
+    if timestamps.paused_at_time:
+        print(f"Paused At: {timestamps.paused_at_time}")
+
+    print("\nProgress")
+    print(f"  Current Node: {progress.current_node}")
+    print(f"  Steps Executed: {progress.steps_executed}")
+    print(f"  Path (last 5): {' → '.join(progress.path[-5:]) if progress.path else '-'}")
+    print(f"  Execution Quality: {progress.execution_quality}")
+    print(f"  Total Retries: {progress.total_retries}")
+    if progress.nodes_with_failures:
+        print(f"  Nodes With Failures: {', '.join(progress.nodes_with_failures)}")
+    else:
+        print("  Nodes With Failures: -")
+
+    print("\nResult")
+    print(f"  Success: {result.success}")
+    if result.error:
+        error_text = result.error.replace("\n", " ")
+        print(f"  Error: {_truncate(error_text, 200)}")
+    else:
+        print("  Error: -")
+    output_keys = sorted(result.output.keys()) if result.output else []
+    print(f"  Output Keys: {', '.join(output_keys) if output_keys else '-'}")
+
+    print("\nCheckpoints")
+    print(f"  Enabled: {session_state.checkpoint_enabled}")
+    print(f"  Latest Checkpoint: {session_state.latest_checkpoint_id or '-'}")
+
+    if session_state.problems:
+        print("\nFailure Summary")
+        for problem in session_state.problems[:3]:
+            if isinstance(problem, dict):
+                summary = (
+                    problem.get("summary")
+                    or problem.get("message")
+                    or problem.get("error")
+                    or str(problem)
+                )
+            else:
+                summary = str(problem)
+            summary_text = summary.replace("\n", " ")
+            print(f"  - {_truncate(summary_text, 160)}")
+
+    print("\nRecovery Hint")
+    if session_state.latest_checkpoint_id:
+        print(
+            "  Recover via: "
+            f"hive resume {args.agent_path} {session_state.session_id} "
+            f"--checkpoint {session_state.latest_checkpoint_id}"
+        )
+    else:
+        print(
+            "  Rerun via: "
+            f"hive run {args.agent_path} --resume-session {session_state.session_id}"
+        )
+
+    return 0
 
 
 def cmd_sessions_checkpoints(args: argparse.Namespace) -> int:
     """List checkpoints for a session."""
-    print("⚠ Session checkpoints command not yet implemented")
-    print("This will be available once checkpoint infrastructure is complete.")
-    print(f"\nAgent: {args.agent_path}")
-    print(f"Session: {args.session_id}")
-    return 1
+    from framework.runner.session_utils import load_checkpoint_store
+
+    agent_path = Path(args.agent_path)
+    checkpoint_store = load_checkpoint_store(agent_path)
+
+    async def _load_checkpoints():
+        summaries = await checkpoint_store.list_checkpoints()
+        if not summaries:
+            return []
+        full_checkpoints = await asyncio.gather(
+            *[checkpoint_store.load_checkpoint(s.checkpoint_id) for s in summaries]
+        )
+        entries = []
+        for summary, full in zip(summaries, full_checkpoints):
+            if full is None:
+                continue
+            if full.session_id != args.session_id:
+                continue
+            entries.append((summary, full))
+        return entries
+
+    entries = asyncio.run(_load_checkpoints())
+
+    if args.json:
+        payload = []
+        for summary, _full in entries:
+            data = summary.model_dump()
+            data["can_resume_from"] = summary.is_clean
+            payload.append(data)
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    if not entries:
+        print("No checkpoints found.")
+        return 0
+
+    header = [
+        ("CHECKPOINT ID", 32),
+        ("TYPE", 14),
+        ("CREATED AT", 20),
+        ("NODE", 18),
+        ("CLEAN", 7),
+        ("RESUMABLE", 10),
+    ]
+    line = " ".join(label.ljust(width) for label, width in header)
+    print(line)
+    print("-" * len(line))
+
+    for summary, _full in entries:
+        row = [
+            _truncate(summary.checkpoint_id, 32).ljust(32),
+            _truncate(summary.checkpoint_type, 14).ljust(14),
+            _truncate(summary.created_at, 20).ljust(20),
+            _truncate(summary.current_node or "-", 18).ljust(18),
+            ("yes" if summary.is_clean else "no").ljust(7),
+            ("yes" if summary.is_clean else "no").ljust(10),
+        ]
+        print(" ".join(row))
+
+    return 0
 
 
 def cmd_pause(args: argparse.Namespace) -> int:
@@ -1612,12 +1861,128 @@ def cmd_pause(args: argparse.Namespace) -> int:
 
 def cmd_resume(args: argparse.Namespace) -> int:
     """Resume a session from checkpoint."""
-    print("⚠ Resume command not yet implemented")
-    print("This will be available once checkpoint resume integration is complete.")
-    print(f"\nAgent: {args.agent_path}")
-    print(f"Session: {args.session_id}")
-    if args.checkpoint:
-        print(f"Checkpoint: {args.checkpoint}")
+    from framework.runner import AgentRunner
+    from framework.runner.session_utils import load_session_store
+
+    agent_path = Path(args.agent_path)
+    session_store = load_session_store(agent_path)
+    session_state = asyncio.run(session_store.read_state(args.session_id))
+
+    if session_state is None:
+        print(f"Error: session '{args.session_id}' not found for {args.agent_path}")
+        return 1
+
     if args.tui:
-        print("Mode: TUI")
-    return 1
+        if args.input or args.input_file:
+            print("Warning: input overrides are not supported in TUI resume mode.")
+
+        from framework.tui.app import AdenTUI
+
+        async def run_with_tui():
+            try:
+                try:
+                    runner = AgentRunner.load(
+                        args.agent_path,
+                        model=getattr(args, "model", None),
+                        enable_tui=True,
+                    )
+                except Exception as e:
+                    print(f"Error loading agent: {e}")
+                    return
+
+                if runner._agent_runtime is None:
+                    runner._setup()
+
+                if runner._agent_runtime and not runner._agent_runtime.is_running:
+                    await runner._agent_runtime.start()
+
+                app = AdenTUI(
+                    runner._agent_runtime,
+                    resume_session=args.session_id,
+                    resume_checkpoint=args.checkpoint,
+                )
+                await app.run_async()
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc()
+                print(f"TUI error: {e}")
+
+            await runner.cleanup_async()
+            return None
+
+        asyncio.run(run_with_tui())
+        print("TUI session ended.")
+        return 0
+
+    try:
+        input_context = _parse_input_context(args)
+    except Exception:
+        return 1
+
+    if not input_context:
+        input_context = session_state.input_data or {}
+
+    resume_session_state = _build_resume_session_state(session_state, args.checkpoint)
+
+    try:
+        runner = AgentRunner.load(
+            args.agent_path,
+            model=getattr(args, "model", None),
+            enable_tui=False,
+        )
+    except Exception as e:
+        print(f"Error loading agent: {e}")
+        return 1
+
+    resume_source = (
+        f"checkpoint {resume_session_state.get('resume_from_checkpoint')}"
+        if resume_session_state.get("resume_from_checkpoint")
+        else f"node {resume_session_state.get('paused_at')}"
+    )
+    print(f"Resuming session {args.session_id} from {resume_source}...")
+
+    result = asyncio.run(runner.run(input_context, session_state=resume_session_state))
+
+    print()
+    print("=" * 60)
+    status_str = "SUCCESS" if result.success else "FAILED"
+    print(f"Status: {status_str}")
+    print(f"Steps executed: {result.steps_executed}")
+    print(f"Path: {' → '.join(result.path)}")
+    print("=" * 60)
+
+    if result.success:
+        print("\n--- Results ---")
+        meaningful_keys = ["final_response", "response", "result", "answer", "output"]
+        shown = False
+        for key in meaningful_keys:
+            if key in result.output:
+                value = result.output[key]
+                if isinstance(value, str) and len(value) > 10:
+                    print(value)
+                    shown = True
+                    break
+                if isinstance(value, (dict, list)):
+                    print(json.dumps(value, indent=2, default=str))
+                    shown = True
+                    break
+        if not shown:
+            for key, value in result.output.items():
+                if not key.startswith("_"):
+                    if isinstance(value, (dict, list)):
+                        print(f"\n{key}:")
+                        value_str = json.dumps(value, indent=2, default=str)
+                        if len(value_str) > 300:
+                            value_str = value_str[:300] + "..."
+                        print(value_str)
+                    else:
+                        val_str = str(value)
+                        if len(val_str) > 200:
+                            val_str = val_str[:200] + "..."
+                        print(f"{key}: {val_str}")
+    elif result.error:
+        print(f"\nError: {result.error}")
+
+    runner.cleanup()
+    return 0 if result.success else 1

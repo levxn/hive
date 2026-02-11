@@ -131,6 +131,21 @@ hive run exports/my_agent --tui
 
 ```
 
+## Recover From Failure
+
+If a run fails or pauses, you can inspect and resume the session:
+
+```bash
+# List recent sessions
+hive sessions list exports/my_agent
+
+# Show details
+hive sessions show exports/my_agent session_20260208_143022_abcd1234
+
+# Resume the session
+hive resume exports/my_agent session_20260208_143022_abcd1234
+```
+
 ## API Keys Setup
 
 For running agents with real LLMs:
