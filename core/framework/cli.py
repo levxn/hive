@@ -82,6 +82,11 @@ def main():
 
     register_testing_commands(subparsers)
 
+    # Register bench commands
+    from framework.bench.cli import register_bench_commands
+
+    register_bench_commands(subparsers)
+
     args = parser.parse_args()
 
     if hasattr(args, "func"):
