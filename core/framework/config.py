@@ -37,10 +37,32 @@ def get_hive_config() -> dict[str, Any]:
 
 
 def get_preferred_model() -> str:
-    """Return the user's preferred LLM model string (e.g. 'anthropic/claude-sonnet-4-20250514')."""
+    """Return the user's preferred LLM model string (e.g. 'anthropic/claude-sonnet-4-20250514').
+
+    Priority:
+    1. Explicit config in ~/.hive/configuration.json
+    2. Auto-detect from available API keys in environment
+    3. Fall back to anthropic/claude-sonnet-4-20250514
+    """
     llm = get_hive_config().get("llm", {})
     if llm.get("provider") and llm.get("model"):
         return f"{llm['provider']}/{llm['model']}"
+
+    # Auto-detect from available API keys
+    _KEY_TO_MODEL = {
+        "ANTHROPIC_API_KEY": "anthropic/claude-sonnet-4-20250514",
+        "OPENAI_API_KEY": "gpt-4.1-nano",
+        "GEMINI_API_KEY": "gemini/gemini-2.0-flash",
+        "GROQ_API_KEY": "groq/llama-3.3-70b-versatile",
+        "CEREBRAS_API_KEY": "cerebras/llama-3.3-70b",
+        "MISTRAL_API_KEY": "mistral/mistral-large-latest",
+        "DEEPSEEK_API_KEY": "deepseek/deepseek-chat",
+        "TOGETHER_API_KEY": "together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    }
+    for env_var, model in _KEY_TO_MODEL.items():
+        if os.environ.get(env_var):
+            return model
+
     return "anthropic/claude-sonnet-4-20250514"
 
 

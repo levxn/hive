@@ -114,22 +114,84 @@ def register_tools(
             "subject": subject,
         }
 
-    def _get_credential(provider: Literal["resend", "gmail"]) -> str | None:
+    def _send_via_smtp(
+        to: list[str],
+        subject: str,
+        html: str,
+        from_email: str,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+    ) -> dict:
+        """Send email using SMTP (e.g. Gmail App Password)."""
+        import smtplib
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        smtp_config = _get_smtp_config()
+        if not smtp_config or not smtp_config.get("host") or not smtp_config.get("password"):
+            return {"error": "SMTP server/password not configured"}
+
+        msg = MIMEMultipart("alternative")
+        msg["From"] = from_email
+        msg["To"] = ", ".join(to)
+        msg["Subject"] = subject
+        if cc:
+            msg["Cc"] = ", ".join(cc)
+        if bcc:
+            msg["Bcc"] = ", ".join(bcc)
+        msg.attach(MIMEText(html, "html"))
+
+        try:
+            with smtplib.SMTP(smtp_config["host"], smtp_config["port"]) as server:
+                server.starttls()
+                server.login(smtp_config["username"], smtp_config["password"])
+                server.send_message(msg)
+
+            return {"success": True, "provider": "smtp", "to": to, "subject": subject}
+        except Exception as e:
+            return {"error": f"SMTP send failed: {e}"}
+
+    def _get_smtp_config() -> dict | None:
+        """Get SMTP configuration from credentials or env vars."""
+        if credentials is not None:
+            smtp_val = credentials.get("smtp") if hasattr(credentials, "get") else None
+            if smtp_val and isinstance(smtp_val, dict):
+                return smtp_val
+        host = os.getenv("SMTP_HOST")
+        password = os.getenv("SMTP_PASSWORD")
+        if host and password:
+            return {
+                "host": host,
+                "port": int(os.getenv("SMTP_PORT", "587")),
+                "username": os.getenv("SMTP_USERNAME"),
+                "password": password,
+            }
+        return None
+
+    def _get_credential(provider: Literal["resend", "gmail", "smtp"]) -> str | dict | None:
         """Get the credential for the requested provider."""
         if provider == "gmail":
             if credentials is not None:
                 return credentials.get("google")
             return os.getenv("GOOGLE_ACCESS_TOKEN")
+        if provider == "smtp":
+            return _get_smtp_config()
         # resend
         if credentials is not None:
             return credentials.get("resend")
         return os.getenv("RESEND_API_KEY")
 
     def _resolve_from_email(from_email: str | None) -> str | None:
-        """Resolve sender address: explicit param > EMAIL_FROM env var."""
+        """Resolve sender address: explicit param > EMAIL_FROM env var > SMTP_USERNAME."""
         if from_email:
             return from_email
-        return os.getenv("EMAIL_FROM")
+        env_from = os.getenv("EMAIL_FROM")
+        if env_from:
+            return env_from
+        smtp_config = _get_smtp_config()
+        if smtp_config:
+            return smtp_config.get("username")
+        return None
 
     def _normalize_recipients(
         value: str | list[str] | None,
@@ -146,7 +208,7 @@ def register_tools(
         to: str | list[str],
         subject: str,
         html: str,
-        provider: Literal["resend", "gmail"],
+        provider: Literal["resend", "gmail", "smtp"],
         from_email: str | None = None,
         cc: str | list[str] | None = None,
         bcc: str | list[str] | None = None,
@@ -175,8 +237,8 @@ def register_tools(
             bcc_list = None
             subject = f"[TEST -> {', '.join(original_to)}] {subject}"
 
-        # Resend always requires from_email; Gmail defaults to authenticated user.
-        if provider == "resend" and not from_email:
+        # Resend and SMTP always require from_email; Gmail defaults to authenticated user.
+        if provider in ("resend", "smtp") and not from_email:
             return {
                 "error": "Sender email is required",
                 "help": "Pass from_email or set EMAIL_FROM environment variable",
@@ -189,6 +251,11 @@ def register_tools(
                     "error": "Gmail credentials not configured",
                     "help": "Connect Gmail via hive.adenhq.com",
                 }
+            if provider == "smtp":
+                return {
+                    "error": "SMTP credentials not configured",
+                    "help": "Set SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD",
+                }
             return {
                 "error": "Resend credentials not configured",
                 "help": "Set RESEND_API_KEY environment variable. "
@@ -199,6 +266,10 @@ def register_tools(
             if provider == "gmail":
                 return _send_via_gmail(
                     credential, to_list, subject, html, from_email, cc_list, bcc_list
+                )
+            if provider == "smtp":
+                return _send_via_smtp(
+                    to_list, subject, html, from_email, cc_list, bcc_list
                 )
             return _send_via_resend(
                 credential, to_list, subject, html, from_email, cc_list, bcc_list
@@ -211,7 +282,7 @@ def register_tools(
         to: str | list[str],
         subject: str,
         html: str,
-        provider: Literal["resend", "gmail"],
+        provider: Literal["resend", "gmail", "smtp"],
         from_email: str | None = None,
         cc: str | list[str] | None = None,
         bcc: str | list[str] | None = None,
@@ -222,12 +293,13 @@ def register_tools(
         Supports multiple email providers:
         - "gmail": Use Gmail API (requires Gmail OAuth2 via Aden)
         - "resend": Use Resend API (requires RESEND_API_KEY)
+        - "smtp": Use SMTP (requires SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD)
 
         Args:
             to: Recipient email address(es). Single string or list of strings.
             subject: Email subject line (1-998 chars per RFC 2822).
             html: Email body as HTML string.
-            provider: Email provider to use ("gmail" or "resend"). Required.
+            provider: Email provider to use ("gmail", "resend", or "smtp"). Required.
             from_email: Sender email address. Falls back to EMAIL_FROM env var if not provided.
                         Optional for Gmail (defaults to authenticated user's address).
             cc: CC recipient(s). Single string or list of strings. Optional.

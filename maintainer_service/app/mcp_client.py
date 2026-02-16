@@ -48,7 +48,7 @@ class MCPClient:
         self._github_repo = os.getenv("GITHUB_REPO_NAME", "")
         # Get chroma config from env
         self._chroma_collection = os.getenv("CHROMA_COLLECTION_NAME", "issues")
-        self._chroma_persist_dir = os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma")
+        self._chroma_persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma")
     
     def _call_tool(self, tool_name: str, **kwargs):
         """Call a registered MCP tool."""

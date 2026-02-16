@@ -61,6 +61,72 @@ def _sanitize_error_message(error: Exception) -> str:
     return f"Network error: {error_str}"
 
 
+def _compact_issue(issue: dict[str, Any]) -> dict[str, Any]:
+    """Strip a GitHub issue object to essential fields only.
+
+    Raw GitHub API issues are 2000-5000 chars each. This reduces them to
+    ~150-250 chars so that a page of 100 issues fits within typical
+    context budgets.
+    """
+    labels = issue.get("labels") or []
+    label_names = [lb["name"] if isinstance(lb, dict) else str(lb) for lb in labels]
+    assignee = issue.get("assignee")
+    return {
+        "number": issue.get("number"),
+        "title": issue.get("title"),
+        "state": issue.get("state"),
+        "labels": label_names,
+        "created_at": issue.get("created_at"),
+        "updated_at": issue.get("updated_at"),
+        "html_url": issue.get("html_url"),
+        "assignee": assignee.get("login") if isinstance(assignee, dict) else None,
+        "is_pull_request": "pull_request" in issue,
+    }
+
+
+def _compact_comment(comment: dict[str, Any]) -> dict[str, Any]:
+    """Strip a GitHub comment to essential fields."""
+    user = comment.get("user") or {}
+    body = comment.get("body") or ""
+    return {
+        "id": comment.get("id"),
+        "user": user.get("login") if isinstance(user, dict) else None,
+        "body": body[:2000] if len(body) > 2000 else body,
+        "created_at": comment.get("created_at"),
+    }
+
+
+def _compact_timeline_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Strip a GitHub timeline event to essential fields."""
+    compact: dict[str, Any] = {
+        "event": event.get("event"),
+        "created_at": event.get("created_at"),
+    }
+    actor = event.get("actor")
+    if isinstance(actor, dict):
+        compact["actor"] = actor.get("login")
+    # Preserve cross-reference info for linked PR detection
+    source = event.get("source")
+    if isinstance(source, dict):
+        source_issue = source.get("issue") or {}
+        compact["source"] = {
+            "type": source.get("type"),
+            "issue_number": source_issue.get("number"),
+            "issue_title": source_issue.get("title"),
+            "is_pull_request": "pull_request" in source_issue,
+            "state": source_issue.get("state"),
+        }
+    # Preserve label info
+    label = event.get("label")
+    if isinstance(label, dict):
+        compact["label"] = label.get("name")
+    # Preserve rename info
+    rename = event.get("rename")
+    if isinstance(rename, dict):
+        compact["rename"] = rename
+    return compact
+
+
 class _GitHubClient:
     """Internal client wrapping GitHub REST API v3 calls."""
 
@@ -178,17 +244,33 @@ class _GitHubClient:
         assignee: str | None = None,
         page: int = 1,
         limit: int = 30,
+        since: str | None = None,
+        sort: str = "created",
+        direction: str = "desc",
+        labels: str | None = None,
     ) -> dict[str, Any]:
-        """List issues for a repository."""
+        """List issues for a repository.
+
+        Returns compact issue objects (number, title, state, labels,
+        created_at, updated_at, html_url, assignee, is_pull_request)
+        to keep the response small enough for LLM context windows.
+        Use get_issue() for the full issue body.
+        """
         owner = _sanitize_path_param(owner, "owner")
         repo = _sanitize_path_param(repo, "repo")
         params = {
             "state": state,
             "per_page": min(limit, 100),
             "page": max(1, page),
+            "sort": sort,
+            "direction": direction,
         }
         if assignee:
             params["assignee"] = assignee
+        if since:
+            params["since"] = since
+        if labels:
+            params["labels"] = labels
 
         response = httpx.get(
             f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues",
@@ -196,7 +278,11 @@ class _GitHubClient:
             params=params,
             timeout=30.0,
         )
-        return self._handle_response(response)
+        result = self._handle_response(response)
+        # Compact the response to avoid blowing up LLM context
+        if result.get("success") and isinstance(result.get("data"), list):
+            result["data"] = [_compact_issue(i) for i in result["data"]]
+        return result
 
     def get_issue(
         self,
@@ -279,7 +365,10 @@ class _GitHubClient:
         repo: str,
         issue_number: int,
     ) -> dict[str, Any]:
-        """Get timeline events for an issue."""
+        """Get timeline events for an issue.
+
+        Returns compact timeline events with essential fields only.
+        """
         owner = _sanitize_path_param(owner, "owner")
         repo = _sanitize_path_param(repo, "repo")
         response = httpx.get(
@@ -287,7 +376,10 @@ class _GitHubClient:
             headers={**self._headers, "Accept": "application/vnd.github.mockingbird-preview+json"},
             timeout=30.0,
         )
-        return self._handle_response(response)
+        result = self._handle_response(response)
+        if result.get("success") and isinstance(result.get("data"), list):
+            result["data"] = [_compact_timeline_event(e) for e in result["data"]]
+        return result
 
     def get_issue_comments(
         self,
@@ -295,7 +387,11 @@ class _GitHubClient:
         repo: str,
         issue_number: int,
     ) -> dict[str, Any]:
-        """Get comments for an issue."""
+        """Get comments for an issue.
+
+        Returns compact comment objects (id, user, body, created_at).
+        Comment bodies are capped at 2000 chars each.
+        """
         owner = _sanitize_path_param(owner, "owner")
         repo = _sanitize_path_param(repo, "repo")
         response = httpx.get(
@@ -303,7 +399,10 @@ class _GitHubClient:
             headers=self._headers,
             timeout=30.0,
         )
-        return self._handle_response(response)
+        result = self._handle_response(response)
+        if result.get("success") and isinstance(result.get("data"), list):
+            result["data"] = [_compact_comment(c) for c in result["data"]]
+        return result
 
     def list_repo_labels(
         self,
@@ -358,7 +457,7 @@ class _GitHubClient:
         repo: str,
         pull_number: int,
     ) -> dict[str, Any]:
-        """Get a specific pull request."""
+        """Get a specific pull request (compact response)."""
         owner = _sanitize_path_param(owner, "owner")
         repo = _sanitize_path_param(repo, "repo")
         response = httpx.get(
@@ -366,7 +465,23 @@ class _GitHubClient:
             headers=self._headers,
             timeout=30.0,
         )
-        return self._handle_response(response)
+        result = self._handle_response(response)
+        if result.get("success") and isinstance(result.get("data"), dict):
+            pr = result["data"]
+            user = pr.get("user") or {}
+            result["data"] = {
+                "number": pr.get("number"),
+                "title": pr.get("title"),
+                "state": pr.get("state"),
+                "merged": pr.get("merged"),
+                "merged_at": pr.get("merged_at"),
+                "html_url": pr.get("html_url"),
+                "user": user.get("login") if isinstance(user, dict) else None,
+                "created_at": pr.get("created_at"),
+                "updated_at": pr.get("updated_at"),
+                "body": (pr.get("body") or "")[:1000],
+            }
+        return result
 
     def create_pull_request(
         self,
@@ -667,6 +782,10 @@ def register_tools(
         assignee: str | None = None,
         page: int = 1,
         limit: int = 30,
+        since: str | None = None,
+        sort: str = "created",
+        direction: str = "desc",
+        labels: str | None = None,
     ) -> dict:
         """
         List issues for a repository.
@@ -678,6 +797,10 @@ def register_tools(
             assignee: Username to filter by (or "none", "*")
             page: Page number for pagination (1-based, default 1)
             limit: Maximum number of issues per page (1-100, default 30)
+            since: Only issues updated at or after this ISO 8601 timestamp (e.g. "2026-02-15T00:00:00Z")
+            sort: Sort field: "created", "updated", or "comments" (default "created")
+            direction: Sort direction: "asc" or "desc" (default "desc")
+            labels: Comma-separated list of label names to filter by (e.g. "bug,enhancement")
 
         Returns:
             Dict with list of issues or error
@@ -686,7 +809,9 @@ def register_tools(
         if isinstance(client, dict):
             return client
         try:
-            return client.list_issues(owner, repo, state, assignee, page, limit)
+            return client.list_issues(
+                owner, repo, state, assignee, page, limit, since, sort, direction, labels
+            )
         except httpx.TimeoutException:
             return {"error": "Request timed out"}
         except httpx.RequestError as e:
