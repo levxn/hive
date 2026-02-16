@@ -8,6 +8,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 import sys
 from datetime import datetime
@@ -178,8 +179,8 @@ def _load_active_session() -> BuildSession | None:
 
         if session_id:
             return _load_session(session_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("Failed to load active session: %s", e)
 
     return None
 
@@ -1111,11 +1112,11 @@ def validate_graph() -> str:
     if entry_candidates:
         reachable = set()
 
-        # For pause/resume agents, start from ALL entry points (including resume)
-        if is_pause_resume_agent:
-            to_visit = list(entry_candidates)  # All nodes without incoming edges
-        else:
-            to_visit = [entry_candidates[0]]  # Just the primary entry
+        # Start from ALL entry candidates (nodes without incoming edges).
+        # This handles both pause/resume agents and async entry point agents
+        # where multiple nodes have no incoming edges (e.g., a primary entry
+        # node and an event-driven entry node).
+        to_visit = list(entry_candidates)
 
         while to_visit:
             current = to_visit.pop()
