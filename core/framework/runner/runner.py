@@ -268,6 +268,7 @@ class AgentRunner:
         storage_path: Path | None = None,
         model: str | None = None,
         intro_message: str = "",
+        node_registry: dict | None = None,
     ):
         """
         Initialize the runner (use AgentRunner.load() instead).
@@ -287,6 +288,7 @@ class AgentRunner:
         self.mock_mode = mock_mode
         self.model = model or self._resolve_default_model()
         self.intro_message = intro_message
+        self._node_registry = node_registry or {}
 
         # Set up storage
         if storage_path:
@@ -523,6 +525,9 @@ class AgentRunner:
                 max_tokens=max_tokens,
             )
 
+            # Read node_registry for function-type nodes with custom implementations
+            node_registry_dict = getattr(agent_module, "node_registry", None) or {}
+
             return cls(
                 agent_path=agent_path,
                 graph=graph,
@@ -531,6 +536,7 @@ class AgentRunner:
                 storage_path=storage_path,
                 model=model,
                 intro_message=intro_message,
+                node_registry=node_registry_dict,
             )
 
         # Fallback: load from agent.json (legacy JSON-based agents)
@@ -820,6 +826,7 @@ class AgentRunner:
             tool_executor=tool_executor,
             runtime_log_store=log_store,
             checkpoint_config=checkpoint_config,
+            node_registry=self._node_registry,
         )
 
         # Pass intro_message through for TUI display

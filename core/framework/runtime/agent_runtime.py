@@ -104,6 +104,7 @@ class AgentRuntime:
         config: AgentRuntimeConfig | None = None,
         runtime_log_store: Any = None,
         checkpoint_config: CheckpointConfig | None = None,
+        node_registry: dict | None = None,
     ):
         """
         Initialize agent runtime.
@@ -145,6 +146,7 @@ class AgentRuntime:
         self._llm = llm
         self._tools = tools or []
         self._tool_executor = tool_executor
+        self._node_registry = node_registry or {}
 
         # Entry points and streams
         self._entry_points: dict[str, EntryPointSpec] = {}
@@ -230,6 +232,7 @@ class AgentRuntime:
                     runtime_log_store=self._runtime_log_store,
                     session_store=self._session_store,
                     checkpoint_config=self._checkpoint_config,
+                    node_registry=self._node_registry,
                 )
                 await stream.start()
                 self._streams[ep_id] = stream
@@ -469,6 +472,7 @@ def create_agent_runtime(
     runtime_log_store: Any = None,
     enable_logging: bool = True,
     checkpoint_config: CheckpointConfig | None = None,
+    node_registry: dict | None = None,
 ) -> AgentRuntime:
     """
     Create and configure an AgentRuntime with entry points.
@@ -512,6 +516,7 @@ def create_agent_runtime(
         config=config,
         runtime_log_store=runtime_log_store,
         checkpoint_config=checkpoint_config,
+        node_registry=node_registry,
     )
 
     for spec in entry_points:

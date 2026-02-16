@@ -151,7 +151,7 @@ def register_all_tools(
         "csv_write",
         "csv_append",
         "csv_info",
-        "csv_sql",
+        "csv_sql",data
         "apollo_enrich_person",
         "apollo_enrich_company",
         "apollo_search_people",

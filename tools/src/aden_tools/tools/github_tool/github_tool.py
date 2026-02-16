@@ -176,6 +176,7 @@ class _GitHubClient:
         repo: str,
         state: str = "open",
         assignee: str | None = None,
+        since: str | None = None,
         page: int = 1,
         limit: int = 30,
     ) -> dict[str, Any]:
@@ -189,6 +190,8 @@ class _GitHubClient:
         }
         if assignee:
             params["assignee"] = assignee
+        if since:
+            params["since"] = since
 
         response = httpx.get(
             f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues",
@@ -665,6 +668,7 @@ def register_tools(
         repo: str,
         state: str = "open",
         assignee: str | None = None,
+        since: str | None = None,
         page: int = 1,
         limit: int = 30,
     ) -> dict:
@@ -676,6 +680,7 @@ def register_tools(
             repo: Repository name
             state: Issue state ("open", "closed", "all")
             assignee: Username to filter by (or "none", "*")
+            since: Only show notifications updated after the given time (ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ)
             page: Page number for pagination (1-based, default 1)
             limit: Maximum number of issues per page (1-100, default 30)
 
@@ -686,7 +691,7 @@ def register_tools(
         if isinstance(client, dict):
             return client
         try:
-            return client.list_issues(owner, repo, state, assignee, page, limit)
+            return client.list_issues(owner, repo, state, assignee, since, page, limit)
         except httpx.TimeoutException:
             return {"error": "Request timed out"}
         except httpx.RequestError as e:

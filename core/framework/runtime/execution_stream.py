@@ -117,6 +117,7 @@ class ExecutionStream:
         runtime_log_store: Any = None,
         session_store: "SessionStore | None" = None,
         checkpoint_config: CheckpointConfig | None = None,
+        node_registry: dict | None = None,
     ):
         """
         Initialize execution stream.
@@ -153,6 +154,7 @@ class ExecutionStream:
         self._runtime_log_store = runtime_log_store
         self._checkpoint_config = checkpoint_config
         self._session_store = session_store
+        self._node_registry = node_registry or {}
 
         # Create stream-scoped runtime
         self._runtime = StreamRuntime(
@@ -394,6 +396,7 @@ class ExecutionStream:
                     storage_path=exec_storage,
                     runtime_logger=runtime_logger,
                     loop_config=self.graph.loop_config,
+                    node_registry=self._node_registry,
                 )
                 # Track executor so inject_input() can reach EventLoopNode instances
                 self._active_executors[execution_id] = executor
