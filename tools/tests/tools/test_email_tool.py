@@ -29,6 +29,12 @@ class TestSendEmail:
         """Send without credentials returns helpful error."""
         monkeypatch.delenv("RESEND_API_KEY", raising=False)
         monkeypatch.delenv("GOOGLE_ACCESS_TOKEN", raising=False)
+        # Also clear SMTP vars to prevent local leaks
+        monkeypatch.delenv("SMTP_HOST", raising=False)
+        monkeypatch.delenv("SMTP_PORT", raising=False)
+        monkeypatch.delenv("SMTP_USERNAME", raising=False)
+        monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+
         monkeypatch.setenv("EMAIL_FROM", "test@example.com")
 
         result = send_email_fn(
@@ -43,6 +49,7 @@ class TestSendEmail:
         """Explicit resend provider without key returns error."""
         monkeypatch.delenv("RESEND_API_KEY", raising=False)
         monkeypatch.delenv("GOOGLE_ACCESS_TOKEN", raising=False)
+        monkeypatch.delenv("SMTP_HOST", raising=False)  # Ensure no SMTP fallback interference
         monkeypatch.setenv("EMAIL_FROM", "test@example.com")
 
         result = send_email_fn(
@@ -58,6 +65,11 @@ class TestSendEmail:
         monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
         monkeypatch.delenv("GOOGLE_ACCESS_TOKEN", raising=False)
         monkeypatch.delenv("EMAIL_FROM", raising=False)
+        # Clear SMTP to ensure no fallback resolution of from_email
+        monkeypatch.delenv("SMTP_HOST", raising=False)
+        monkeypatch.delenv("SMTP_PORT", raising=False)
+        monkeypatch.delenv("SMTP_USERNAME", raising=False)
+        monkeypatch.delenv("SMTP_PASSWORD", raising=False)
 
         result = send_email_fn(
             to="test@example.com", subject="Test", html="<p>Hi</p>", provider="resend"
@@ -68,10 +80,13 @@ class TestSendEmail:
         assert "help" in result
 
     def test_from_email_falls_back_to_env_var(self, send_email_fn, monkeypatch):
-        """EMAIL_FROM env var is used when from_email not provided."""
+        """EMAIL_FROM env var is used if from_email arg is missing."""
         monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
-        monkeypatch.setenv("EMAIL_FROM", "default@company.com")
-
+        monkeypatch.setenv("EMAIL_FROM", "env_user@example.com")
+        monkeypatch.delenv("GOOGLE_ACCESS_TOKEN", raising=False)
+        # Clear SMTP to ensure we are testing EMAIL_FROM, not SMTP username
+        monkeypatch.delenv("SMTP_HOST", raising=False)
+        monkeypatch.delenv("SMTP_USERNAME", raising=False)
         with patch("resend.Emails.send") as mock_send:
             mock_send.return_value = {"id": "email_env"}
             result = send_email_fn(
@@ -80,7 +95,7 @@ class TestSendEmail:
 
         assert result["success"] is True
         call_args = mock_send.call_args[0][0]
-        assert call_args["from"] == "default@company.com"
+        assert call_args["from"] == "env_user@example.com"
 
     def test_explicit_from_email_overrides_env_var(self, send_email_fn, monkeypatch):
         """Explicit from_email overrides EMAIL_FROM env var."""
@@ -369,6 +384,130 @@ class TestResendProvider:
             )
 
         assert "error" in result
+
+
+class TestSendBudgetAlertEmail:
+    """Tests for send_budget_alert_email tool."""
+
+    def test_no_credentials_returns_error(self, send_budget_alert_fn, monkeypatch):
+        """Budget alert without credentials returns error."""
+        monkeypatch.delenv("RESEND_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_ACCESS_TOKEN", raising=False)
+        monkeypatch.delenv("SMTP_HOST", raising=False)
+        monkeypatch.delenv("SMTP_PORT", raising=False)
+        monkeypatch.delenv("SMTP_USERNAME", raising=False)
+        monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+        monkeypatch.setenv("EMAIL_FROM", "test@example.com")
+
+        result = send_budget_alert_fn(
+            to="test@example.com",
+            budget_name="Marketing Q1",
+            current_spend=8000.0,
+            budget_limit=10000.0,
+        )
+
+        assert "error" in result
+
+    def test_exceeded_budget_severity(self, send_budget_alert_fn, monkeypatch):
+        """Spend >= 100% generates EXCEEDED alert."""
+        monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+        monkeypatch.setenv("EMAIL_FROM", "test@example.com")
+
+        with patch("resend.Emails.send") as mock_send:
+            mock_send.return_value = {"id": "email_budget_1"}
+            result = send_budget_alert_fn(
+                to="test@example.com",
+                budget_name="Marketing Q1",
+                current_spend=12000.0,
+                budget_limit=10000.0,
+            )
+
+        assert result["success"] is True
+        assert "EXCEEDED" in result["subject"]
+
+    def test_critical_budget_severity(self, send_budget_alert_fn, monkeypatch):
+        """Spend 90-99% generates CRITICAL alert."""
+        monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+        monkeypatch.setenv("EMAIL_FROM", "test@example.com")
+
+        with patch("resend.Emails.send") as mock_send:
+            mock_send.return_value = {"id": "email_budget_2"}
+            result = send_budget_alert_fn(
+                to="test@example.com",
+                budget_name="Dev Budget",
+                current_spend=9500.0,
+                budget_limit=10000.0,
+            )
+
+        assert result["success"] is True
+        assert "CRITICAL" in result["subject"]
+
+    def test_warning_budget_severity(self, send_budget_alert_fn, monkeypatch):
+        """Spend 75-89% generates WARNING alert."""
+        monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+        monkeypatch.setenv("EMAIL_FROM", "test@example.com")
+
+        with patch("resend.Emails.send") as mock_send:
+            mock_send.return_value = {"id": "email_budget_3"}
+            result = send_budget_alert_fn(
+                to="test@example.com",
+                budget_name="Ops Budget",
+                current_spend=8000.0,
+                budget_limit=10000.0,
+            )
+
+        assert result["success"] is True
+        assert "WARNING" in result["subject"]
+
+    def test_info_budget_severity(self, send_budget_alert_fn, monkeypatch):
+        """Spend < 75% generates INFO alert."""
+        monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+        monkeypatch.setenv("EMAIL_FROM", "test@example.com")
+
+        with patch("resend.Emails.send") as mock_send:
+            mock_send.return_value = {"id": "email_budget_4"}
+            result = send_budget_alert_fn(
+                to="test@example.com",
+                budget_name="Small Budget",
+                current_spend=3000.0,
+                budget_limit=10000.0,
+            )
+
+        assert result["success"] is True
+        assert "INFO" in result["subject"]
+
+    def test_custom_currency(self, send_budget_alert_fn, monkeypatch):
+        """Custom currency is included in the alert."""
+        monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+        monkeypatch.setenv("EMAIL_FROM", "test@example.com")
+
+        with patch("resend.Emails.send") as mock_send:
+            mock_send.return_value = {"id": "email_budget_5"}
+            result = send_budget_alert_fn(
+                to="test@example.com",
+                budget_name="EU Budget",
+                current_spend=5000.0,
+                budget_limit=10000.0,
+                currency="EUR",
+            )
+
+        assert result["success"] is True
+
+    def test_zero_budget_limit(self, send_budget_alert_fn, monkeypatch):
+        """Zero budget limit does not cause division by zero."""
+        monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+        monkeypatch.setenv("EMAIL_FROM", "test@example.com")
+
+        with patch("resend.Emails.send") as mock_send:
+            mock_send.return_value = {"id": "email_budget_6"}
+            result = send_budget_alert_fn(
+                to="test@example.com",
+                budget_name="Empty Budget",
+                current_spend=100.0,
+                budget_limit=0.0,
+            )
+
+        assert result["success"] is True
 
 
 class TestGmailProvider:
