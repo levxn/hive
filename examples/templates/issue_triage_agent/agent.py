@@ -1,10 +1,21 @@
-"""Agent graph construction for Issue Triage Agent."""
+"""Agent graph construction for Issue Triage Agent.
+
+Architecture (modelled after gmail_inbox_guardian):
+
+  PRIMARY:  generic (self-loop, user converses forever)
+  ASYNC:    intake -> fetch -> analyze -> dump -> (loop) -> report
+
+Uses AgentRuntime for:
+  - Multi-entry-point execution (primary + timer-driven)
+  - Shared state: generic writes triage_config, pipeline reads it
+  - Background execution: triage runs without blocking user conversation
+  - Checkpointing for resume capability
+"""
 
 import os
 from pathlib import Path
 
 # Load .env from the agent directory so MCP subprocesses inherit env vars
-# (GITHUB_TOKEN, GITHUB_REPO_OWNER, SMTP_*, OPENAI_API_KEY, etc.)
 try:
     from dotenv import load_dotenv
 
@@ -13,21 +24,21 @@ try:
     if _env_path.exists():
         load_dotenv(_env_path, override=False)
 
-    # Resolve relative CHROMA_PERSIST_DIR to absolute (relative to agent dir,
-    # not the MCP subprocess cwd which is the tools/ directory)
+    # Resolve relative CHROMA_PERSIST_DIR to absolute
     _chroma_dir = os.environ.get("CHROMA_PERSIST_DIR", "")
     if _chroma_dir and not os.path.isabs(_chroma_dir):
         os.environ["CHROMA_PERSIST_DIR"] = str(_agent_dir / _chroma_dir)
 except ImportError:
-    pass  # python-dotenv not installed; user must export env vars manually
+    pass
 
-from framework.graph import EdgeSpec, EdgeCondition, Goal, SuccessCriterion, Constraint
-from framework.graph.edge import GraphSpec
-from framework.graph.executor import ExecutionResult, GraphExecutor
-from framework.runtime.event_bus import EventBus
-from framework.runtime.core import Runtime
+from framework.graph import Constraint, EdgeCondition, EdgeSpec, Goal, SuccessCriterion
+from framework.graph.checkpoint_config import CheckpointConfig
+from framework.graph.edge import AsyncEntryPointSpec, GraphSpec
+from framework.graph.executor import ExecutionResult
 from framework.llm import LiteLLMProvider
 from framework.runner.tool_registry import ToolRegistry
+from framework.runtime.agent_runtime import AgentRuntime, AgentRuntimeConfig, create_agent_runtime
+from framework.runtime.execution_stream import EntryPointSpec
 
 from .config import default_config, metadata
 from .nodes import (
@@ -48,7 +59,8 @@ goal = Goal(
     description=(
         "Triage GitHub issues using LLM-powered novelty and severity analysis, "
         "maintain a vector knowledge base for deduplication, and send categorized "
-        "HTML email digests to maintainers."
+        "HTML email digests to maintainers. Runs as a background pipeline while "
+        "the user converses with the agent."
     ),
     success_criteria=[
         SuccessCriterion(
@@ -106,6 +118,15 @@ goal = Goal(
             constraint_type="hard",
             category="safety",
         ),
+        Constraint(
+            id="c-shared-config",
+            description=(
+                "Triage config must persist in shared memory so timer-triggered "
+                "pipeline runs can access it without re-asking the user"
+            ),
+            constraint_type="hard",
+            category="architectural",
+        ),
     ],
 )
 
@@ -122,19 +143,20 @@ nodes = [
 ]
 
 # ---------------------------------------------------------------------------
-# Edges — linear pipeline with loop-back for forever-alive
+# Edges
 # ---------------------------------------------------------------------------
 edges = [
-    # generic -> intake: user wants to run a task
+    # PRIMARY FLOW: generic self-loop (user stays here forever)
     EdgeSpec(
-        id="generic-to-intake",
+        id="generic-to-generic",
         source="generic",
-        target="intake",
+        target="generic",
         condition=EdgeCondition.ON_SUCCESS,
         priority=1,
-        description="User wants to run a task — collect config and fetch issues",
+        description="Self-loop: user keeps chatting after setting config",
     ),
-    # intake -> fetch: candidates exist, start per-issue loop
+
+    # ASYNC PIPELINE: intake -> fetch (candidates exist)
     EdgeSpec(
         id="intake-to-fetch",
         source="intake",
@@ -142,9 +164,9 @@ edges = [
         condition=EdgeCondition.CONDITIONAL,
         condition_expr="output.get('issue_queue') is not None",
         priority=1,
-        description="Candidates found — start per-issue processing loop",
+        description="Candidates found -- start per-issue processing loop",
     ),
-    # intake -> report: no candidates, skip loop
+    # ASYNC PIPELINE: intake -> report (no candidates, skip loop)
     EdgeSpec(
         id="intake-to-report",
         source="intake",
@@ -152,27 +174,26 @@ edges = [
         condition=EdgeCondition.CONDITIONAL,
         condition_expr="output.get('triage_results') is not None",
         priority=1,
-        description="No candidates — skip loop, go to report",
+        description="No candidates -- skip loop, go to report",
     ),
-    # fetch -> analyze: content fetched for one issue
+
+    # ASYNC PIPELINE: per-issue loop
     EdgeSpec(
         id="fetch-to-analyze",
         source="fetch",
         target="analyze",
         condition=EdgeCondition.ON_SUCCESS,
         priority=1,
-        description="Issue content fetched — score against ChromaDB",
+        description="Issue content fetched -- score against ChromaDB",
     ),
-    # analyze -> dump: issue scored, upsert to ChromaDB
     EdgeSpec(
         id="analyze-to-dump",
         source="analyze",
         target="dump",
         condition=EdgeCondition.ON_SUCCESS,
         priority=1,
-        description="Issue scored — upsert to ChromaDB",
+        description="Issue scored -- upsert to ChromaDB",
     ),
-    # dump -> fetch: more issues to process (FEEDBACK LOOP)
     EdgeSpec(
         id="dump-to-fetch",
         source="dump",
@@ -180,9 +201,8 @@ edges = [
         condition=EdgeCondition.CONDITIONAL,
         condition_expr="output.get('issue_queue') is not None",
         priority=-1,
-        description="More issues — loop back to fetch next one",
+        description="More issues -- loop back to fetch next one",
     ),
-    # dump -> report: all issues processed (FORWARD)
     EdgeSpec(
         id="dump-to-report",
         source="dump",
@@ -190,16 +210,7 @@ edges = [
         condition=EdgeCondition.CONDITIONAL,
         condition_expr="output.get('triage_results') is not None",
         priority=1,
-        description="All issues processed — present results",
-    ),
-    # report -> generic: loop back for another task
-    EdgeSpec(
-        id="report-to-generic",
-        source="report",
-        target="generic",
-        condition=EdgeCondition.ON_SUCCESS,
-        priority=-1,
-        description="Loop back to generic for more conversation or another task",
+        description="All issues processed -- present results",
     ),
 ]
 
@@ -208,11 +219,32 @@ edges = [
 # ---------------------------------------------------------------------------
 entry_node = "generic"
 entry_points = {"start": "generic"}
+async_entry_points = [
+    AsyncEntryPointSpec(
+        id="triage-timer",
+        name="Scheduled Triage Run",
+        entry_node="intake",
+        trigger_type="timer",
+        trigger_config={"interval_minutes": 5},
+        isolation_level="shared",
+        max_concurrent=1,
+    ),
+]
 pause_nodes = []
-terminal_nodes = []  # Forever-alive: loops back to intake
-
-# Module-level config read by AgentRunner.load() when building GraphSpec
+terminal_nodes = []
 conversation_mode = "continuous"
+identity_prompt = (
+    "You are an issue triage assistant. You help maintainers triage GitHub issues "
+    "by analyzing novelty and severity against a knowledge base, detecting stale "
+    "issues, and sending email digests -- all running in the background."
+)
+runtime_config = AgentRuntimeConfig(
+    webhook_host="127.0.0.1",
+    webhook_port=8080,
+    webhook_routes=[],
+)
+
+# Module-level config for AgentRunner.load()
 loop_config = {
     "max_iterations": 500,
     "max_tool_calls_per_turn": 100,
@@ -223,17 +255,20 @@ loop_config = {
 
 class IssueTriageAgent:
     """
-    Issue Triage Agent — 6-node pipeline with per-issue processing loop.
+    Issue Triage Agent -- event-driven triage with background pipeline.
 
-    Flow: generic -> intake -> fetch -> analyze -> dump -> fetch (loop)
-                                                       -> report -> generic
+    Primary:  generic (self-loop, user converses forever)
+    Async:    intake -> fetch -> analyze -> dump -> (loop) -> report
 
-    generic: conversational entry, routes to intake when user wants to act
-    intake:  collect mode/lookback/email, dual-fetch ALL issues, filter, stale detection
-    fetch:   for ONE issue: get body, comments, timeline, linked PRs
-    analyze: for ONE issue: search ChromaDB, score novelty/severity/impact
-    dump:    for ONE issue: upsert to ChromaDB, loop back to fetch or go to report
-    report:  present results, send email digest
+    Entry Points:
+    - "start" (primary): User chats, sets triage config via generic node
+    - "triage-timer" (timer): Scheduled triage run every 5 minutes
+
+    Uses AgentRuntime for:
+    - Multi-entry-point execution (primary + timer-driven)
+    - Shared state for config persistence across entry points
+    - Background execution without blocking user conversation
+    - Checkpointing for resume capability
     """
 
     def __init__(self, config=None):
@@ -245,10 +280,10 @@ class IssueTriageAgent:
         self.entry_points = entry_points
         self.pause_nodes = pause_nodes
         self.terminal_nodes = terminal_nodes
-        self._executor: GraphExecutor | None = None
         self._graph: GraphSpec | None = None
-        self._event_bus: EventBus | None = None
+        self._agent_runtime: AgentRuntime | None = None
         self._tool_registry: ToolRegistry | None = None
+        self._storage_path: Path | None = None
 
     def _build_graph(self) -> GraphSpec:
         """Build the GraphSpec."""
@@ -264,90 +299,127 @@ class IssueTriageAgent:
             edges=self.edges,
             default_model=self.config.model,
             max_tokens=self.config.max_tokens,
-            conversation_mode="continuous",
             loop_config={
                 "max_iterations": 500,
                 "max_tool_calls_per_turn": 100,
                 "max_history_tokens": 64000,
                 "max_tool_result_chars": 30000,
             },
+            conversation_mode="continuous",
+            identity_prompt=identity_prompt,
+            async_entry_points=[
+                AsyncEntryPointSpec(
+                    id="triage-timer",
+                    name="Scheduled Triage Run",
+                    entry_node="intake",
+                    trigger_type="timer",
+                    trigger_config={"interval_minutes": 5},
+                    isolation_level="shared",
+                    max_concurrent=1,
+                ),
+            ],
         )
 
-    def _setup(self) -> GraphExecutor:
-        """Set up the executor with all components."""
-        from pathlib import Path
+    def _setup(self, mock_mode=False) -> None:
+        """Set up the agent runtime with sessions, checkpoints, and logging."""
+        self._storage_path = Path.home() / ".hive" / "agents" / "issue_triage_agent"
+        self._storage_path.mkdir(parents=True, exist_ok=True)
 
-        storage_path = Path.home() / ".hive" / "agents" / "issue_triage_agent"
-        storage_path.mkdir(parents=True, exist_ok=True)
-
-        self._event_bus = EventBus()
         self._tool_registry = ToolRegistry()
 
         mcp_config_path = Path(__file__).parent / "mcp_servers.json"
         if mcp_config_path.exists():
             self._tool_registry.load_mcp_config(mcp_config_path)
 
-        llm = LiteLLMProvider(
-            model=self.config.model,
-            api_key=self.config.api_key,
-            api_base=self.config.api_base,
-        )
+        llm = None
+        if not mock_mode:
+            llm = LiteLLMProvider(
+                model=self.config.model,
+                api_key=self.config.api_key,
+                api_base=self.config.api_base,
+            )
 
         tool_executor = self._tool_registry.get_executor()
         tools = list(self._tool_registry.get_tools().values())
 
         self._graph = self._build_graph()
-        runtime = Runtime(storage_path)
 
-        self._executor = GraphExecutor(
-            runtime=runtime,
+        checkpoint_config = CheckpointConfig(
+            enabled=True,
+            checkpoint_on_node_start=False,
+            checkpoint_on_node_complete=True,
+            checkpoint_max_age_days=7,
+            async_checkpoint=True,
+        )
+
+        entry_point_specs = [
+            # Primary entry point (user-facing conversation)
+            EntryPointSpec(
+                id="default",
+                name="Issue Triage Chat",
+                entry_node=self.entry_node,
+                trigger_type="manual",
+                isolation_level="shared",
+            ),
+            # Scheduled triage pipeline (runs in background)
+            EntryPointSpec(
+                id="triage-timer",
+                name="Scheduled Triage Run",
+                entry_node="intake",
+                trigger_type="timer",
+                trigger_config={"interval_minutes": 5},
+                isolation_level="shared",
+                max_concurrent=1,
+            ),
+        ]
+
+        self._agent_runtime = create_agent_runtime(
+            graph=self._graph,
+            goal=self.goal,
+            storage_path=self._storage_path,
+            entry_points=entry_point_specs,
             llm=llm,
             tools=tools,
             tool_executor=tool_executor,
-            event_bus=self._event_bus,
-            storage_path=storage_path,
-            loop_config=self._graph.loop_config,
+            checkpoint_config=checkpoint_config,
+            config=runtime_config,
         )
 
-        return self._executor
-
-    async def start(self) -> None:
-        """Set up the agent (initialize executor and tools)."""
-        if self._executor is None:
-            self._setup()
+    async def start(self, mock_mode=False) -> None:
+        """Set up and start the agent runtime."""
+        if self._agent_runtime is None:
+            self._setup(mock_mode=mock_mode)
+        if not self._agent_runtime.is_running:
+            await self._agent_runtime.start()
 
     async def stop(self) -> None:
-        """Clean up resources."""
-        self._executor = None
-        self._event_bus = None
+        """Stop the agent runtime and clean up."""
+        if self._agent_runtime and self._agent_runtime.is_running:
+            await self._agent_runtime.stop()
+        self._agent_runtime = None
 
     async def trigger_and_wait(
         self,
-        entry_point: str,
-        input_data: dict,
+        entry_point: str = "default",
+        input_data: dict | None = None,
         timeout: float | None = None,
         session_state: dict | None = None,
     ) -> ExecutionResult | None:
         """Execute the graph and wait for completion."""
-        if self._executor is None:
+        if self._agent_runtime is None:
             raise RuntimeError("Agent not started. Call start() first.")
-        if self._graph is None:
-            raise RuntimeError("Graph not built. Call start() first.")
 
-        return await self._executor.execute(
-            graph=self._graph,
-            goal=self.goal,
-            input_data=input_data,
+        return await self._agent_runtime.trigger_and_wait(
+            entry_point_id=entry_point,
+            input_data=input_data or {},
             session_state=session_state,
         )
 
-    async def run(self, context: dict, session_state=None) -> ExecutionResult:
+    async def run(self, context: dict, mock_mode=False, session_state=None) -> ExecutionResult:
         """Run the agent (convenience method for single execution)."""
-        await self.start()
+        await self.start(mock_mode=mock_mode)
         try:
-            result = await self.trigger_and_wait(
-                "start", context, session_state=session_state
-            )
+            result = await self.trigger_and_wait("default", context, session_state=session_state)
             return result or ExecutionResult(success=False, error="Execution timeout")
         finally:
             await self.stop()
@@ -395,15 +467,6 @@ class IssueTriageAgent:
                 errors.append(
                     f"Entry point '{ep_id}' references unknown node '{node_id}'"
                 )
-
-        # Check that forever-alive graph has no dead-end nodes
-        if not self.terminal_nodes:
-            sources = {e.source for e in self.edges}
-            for node in self.nodes:
-                if node.id not in sources:
-                    warnings.append(
-                        f"Node '{node.id}' has no outgoing edge in a forever-alive graph"
-                    )
 
         return {
             "valid": len(errors) == 0,

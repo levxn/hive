@@ -1,9 +1,8 @@
 """
-Issue Triage Agent — Triage GitHub issues with LLM-powered analysis.
+Issue Triage Agent - Triage GitHub issues with LLM-powered analysis.
 
-Monitors a GitHub repository, analyzes issue novelty and severity against
-a vector knowledge base, identifies high-value issues, detects stale
-assignments, and sends categorized HTML email digests to maintainers.
+Background pipeline fetches, analyzes, and scores issues against a vector
+knowledge base while the user converses with the agent in real time.
 """
 
 from .agent import (
@@ -12,6 +11,8 @@ from .agent import (
     goal,
     nodes,
     edges,
+    async_entry_points,
+    runtime_config,
     conversation_mode,
     loop_config,
     entry_node,
@@ -29,6 +30,8 @@ __all__ = [
     "goal",
     "nodes",
     "edges",
+    "async_entry_points",
+    "runtime_config",
     "conversation_mode",
     "loop_config",
     "entry_node",

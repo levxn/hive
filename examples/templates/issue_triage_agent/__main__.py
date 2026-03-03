@@ -1,7 +1,8 @@
 """
 CLI entry point for Issue Triage Agent.
 
-Uses AgentRuntime for multi-entrypoint support with HITL pause/resume.
+Uses AgentRuntime for multi-entry-point support with timer-driven
+background triage pipeline.
 """
 
 import asyncio
@@ -29,7 +30,7 @@ def setup_logging(verbose=False, debug=False):
 @click.group()
 @click.version_option(version="1.0.0")
 def cli():
-    """Issue Triage Agent — Triage GitHub issues with LLM-powered analysis."""
+    """Issue Triage Agent - Triage GitHub issues with LLM-powered analysis."""
     pass
 
 
@@ -37,14 +38,15 @@ def cli():
 @click.option("--quiet", "-q", is_flag=True, help="Only output result JSON")
 @click.option("--verbose", "-v", is_flag=True, help="Show execution details")
 @click.option("--debug", is_flag=True, help="Show debug logging")
-def run(quiet, verbose, debug):
+@click.option("--mock", is_flag=True, help="Run in mock mode")
+def run(quiet, verbose, debug, mock):
     """Execute the issue triage agent."""
     if not quiet:
         setup_logging(verbose=verbose, debug=debug)
 
     context = {}
 
-    result = asyncio.run(default_agent.run(context))
+    result = asyncio.run(default_agent.run(context, mock_mode=mock))
 
     output_data = {
         "success": result.success,
@@ -59,9 +61,10 @@ def run(quiet, verbose, debug):
 
 
 @cli.command()
+@click.option("--mock", is_flag=True, help="Run in mock mode")
 @click.option("--verbose", "-v", is_flag=True, help="Show execution details")
 @click.option("--debug", is_flag=True, help="Show debug logging")
-def tui(verbose, debug):
+def tui(mock, verbose, debug):
     """Launch the TUI dashboard for interactive triage."""
     setup_logging(verbose=verbose, debug=debug)
 
@@ -78,13 +81,11 @@ def tui(verbose, debug):
     from framework.llm import LiteLLMProvider
     from framework.runner.tool_registry import ToolRegistry
     from framework.runtime.agent_runtime import create_agent_runtime
-    from framework.runtime.event_bus import EventBus
     from framework.runtime.execution_stream import EntryPointSpec
 
     async def run_with_tui():
         agent = IssueTriageAgent()
 
-        agent._event_bus = EventBus()
         agent._tool_registry = ToolRegistry()
 
         storage_path = Path.home() / ".hive" / "agents" / "issue_triage_agent"
@@ -94,11 +95,13 @@ def tui(verbose, debug):
         if mcp_config_path.exists():
             agent._tool_registry.load_mcp_config(mcp_config_path)
 
-        llm = LiteLLMProvider(
-            model=agent.config.model,
-            api_key=agent.config.api_key,
-            api_base=agent.config.api_base,
-        )
+        llm = None
+        if not mock:
+            llm = LiteLLMProvider(
+                model=agent.config.model,
+                api_key=agent.config.api_key,
+                api_base=agent.config.api_base,
+            )
 
         tools = list(agent._tool_registry.get_tools().values())
         tool_executor = agent._tool_registry.get_executor()
@@ -109,12 +112,23 @@ def tui(verbose, debug):
             goal=agent.goal,
             storage_path=storage_path,
             entry_points=[
+                # Primary: user-facing conversation
                 EntryPointSpec(
                     id="start",
-                    name="Start Issue Triage",
-                    entry_node="intake",
+                    name="Issue Triage Chat",
+                    entry_node="generic",
                     trigger_type="manual",
-                    isolation_level="isolated",
+                    isolation_level="shared",
+                ),
+                # Background: scheduled triage pipeline
+                EntryPointSpec(
+                    id="triage-timer",
+                    name="Scheduled Triage Run",
+                    entry_node="intake",
+                    trigger_type="timer",
+                    trigger_config={"interval_minutes": 5},
+                    isolation_level="shared",
+                    max_concurrent=1,
                 ),
             ],
             llm=llm,
@@ -178,9 +192,7 @@ async def _interactive_shell(verbose=False):
     setup_logging(verbose=verbose)
 
     click.echo("=== Issue Triage Agent ===")
-    click.echo(
-        "Commands: 'triage [hours]', 'backfill', 'stale', 'quit'\n"
-    )
+    click.echo("Chat with the agent. Triage runs in the background on a timer.\n")
 
     agent = IssueTriageAgent()
     await agent.start()
@@ -195,9 +207,14 @@ async def _interactive_shell(verbose=False):
                     click.echo("Goodbye!")
                     break
 
+                if not user_input.strip():
+                    continue
+
                 click.echo("\nProcessing...\n")
 
-                result = await agent.trigger_and_wait("start", {})
+                result = await agent.trigger_and_wait(
+                    "default", {"user_input": user_input}
+                )
 
                 if result is None:
                     click.echo("\n[Execution timed out]\n")
@@ -205,9 +222,9 @@ async def _interactive_shell(verbose=False):
 
                 if result.success:
                     output = result.output
-                    if "digest_status" in output:
+                    if "last_triage_report" in output:
                         click.echo(
-                            f"\nDigest status: {output['digest_status']}\n"
+                            f"\nReport saved: {output['last_triage_report']}\n"
                         )
                 else:
                     click.echo(f"\nFailed: {result.error}\n")

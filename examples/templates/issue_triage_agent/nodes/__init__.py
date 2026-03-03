@@ -1,147 +1,168 @@
 """Node definitions for Issue Triage Agent.
 
-Flow: generic -> intake -> fetch -> analyze -> dump -> fetch (loop) -> report -> generic
+Architecture (modelled after gmail_inbox_guardian):
 
-  generic : conversational entry point, routes to intake on task requests
-  intake  : collects config, dual-fetches ALL issues, filters, stale detection
-  fetch   : ONE issue: get body, comments, timeline, linked PRs
-  analyze : ONE issue: search ChromaDB, score novelty/severity/impact
-  dump    : ONE issue: upsert to ChromaDB, loop back to fetch or forward to report
-  report  : present results, send email digest
+  PRIMARY FLOW:   generic  (self-loop, user converses forever)
+  ASYNC PIPELINE: intake -> fetch -> analyze -> dump -> (loop) -> report
 
-The fetch->analyze->dump loop processes issues ONE AT A TIME.
+Shared memory connects both flows:
+  - generic writes triage_config -> intake reads it
+  - report saves report.txt   -> generic reads it via load_data
+
+The async pipeline is triggered on a scheduled timer.
+The user can keep chatting with generic while triage runs in the background.
 """
 
 from framework.graph import NodeSpec
 
 # ---------------------------------------------------------------------------
-# Node 0: Generic (client-facing conversational entry point)
+# Node 0: Generic (PRIMARY -- client-facing, self-loop)
 # ---------------------------------------------------------------------------
 generic_node = NodeSpec(
     id="generic",
     name="Generic",
     description=(
-        "Conversational entry point. Routes to intake when user wants "
-        "to triage issues, check stale issues, or any issue-related task."
+        "Client-facing conversational hub. Sets triage config in shared memory, "
+        "reads past triage results from files, answers user questions."
     ),
     node_type="event_loop",
     client_facing=True,
+    max_node_visits=0,
     input_keys=[],
-    output_keys=["user_intent"],
+    output_keys=["triage_config"],
     system_prompt="""\
-You are the entry point for a GitHub Issue Triage Agent (adenhq/hive repo).
+You are the Issue Triage Agent for the adenhq/hive repository.
 
-CAPABILITIES (executed by downstream nodes, NOT by you):
-- Triage recent issues against a ChromaDB knowledge base
-- Detect stale issues (assigned, no activity 14+ days)
-- Send HTML email digests
+You are the conversational hub. Users chat with you directly.
+The triage pipeline (fetch, analyze, score, email) runs in the BACKGROUND
+on a scheduled timer, separate from this conversation.
 
-ROUTING -- call set_output IMMEDIATELY when the user's message involves:
-- Fetching, triaging, checking, scanning, or listing issues
-- Time windows ("last 24 hours", "today", "this week", "7 days", etc.)
-- "how many issues", "what issues", "get issues", "find issues"
-- Stale/inactive/zombie issue checks
-- "run", "start", "go", "triage", "analyze", "check"
+== WHAT YOU CAN DO ==
 
-To route: set_output("user_intent", "<the user's full request verbatim>")
+1. CHAT: Answer questions about the agent, triage process, GitHub issues, etc.
 
-STAY AND CHAT only when the user:
-- Asks meta questions about the agent ("what can you do?", "how does triage work?")
-- Says hello/hi without any task intent
-- Asks something completely unrelated to running a task
+2. SET TRIAGE CONFIG: When the user wants to triage issues, parse their request
+   and call set_output("triage_config", <JSON string>):
+   {"mode": "triage", "lookback_hours": 24, "send_email": true}
 
-CRITICAL RULES:
-- Default to routing. When in doubt, ROUTE.
+   Parse timeframes: "24 hours"->24, "7 days"->168, "today"->24,
+   "this week"->168, "2 weeks"->336. Default: 24 hours.
+   mode: "triage" (default) or "stale" (if user mentions stale/inactive/zombie)
+   send_email: true by default, false only if user says no.
+
+   After saving config, tell the user:
+   "Config saved! The background triage pipeline runs every 5 minutes
+   and will pick this up on its next scheduled run."
+
+3. READ PAST RESULTS: When the user asks about results ("how many issues?",
+   "what did you find?", "show me the report"):
+   - Call list_data_files() to see what files exist
+   - Call load_data(filename="report.txt") to read the latest triage report
+   - Answer the user's question based on the file contents
+   - If no report.txt exists yet, tell the user:
+     "No triage results available yet. The background pipeline runs every
+     5 minutes. Check back shortly after configuring a triage run."
+
+== WHEN THE USER FIRST ARRIVES ==
+
+Greet them briefly. Mention capabilities:
+- Set triage config (e.g. "triage last 24 hours")
+- Ask about past triage results
+- Chat about anything
+
+== ROUTING KEYWORDS -- call set_output for these ==
+
+When the user says anything involving:
+- "triage", "check", "scan", "find", "get", "fetch", "list" + issues
+- Time windows: "last 24 hours", "today", "this week", "7 days"
+- "stale", "inactive", "zombie"
+- "run", "start", "go"
+
+Do: parse their intent, set_output("triage_config", {...}), and confirm.
+
+If user asks about results AT THE SAME TIME (e.g. "how many issues in last 24h"):
+  1. First try load_data("report.txt") to answer from past results
+  2. Also set_output("triage_config", {...}) to schedule a fresh run
+
+== RULES ==
+- You have NO GitHub API tools. Cannot fetch issues directly.
+- You have NO ChromaDB tools. Cannot search or upsert.
+- You CAN read files saved by the background pipeline (load_data, list_data_files).
 - NEVER say "I need data", "provide me with", "I require", "please provide".
-- You have NO data tools. You CANNOT fetch issues yourself.
-- If the user wants anything done with issues, call set_output to route to intake.
-- Pass the user's FULL original message in set_output so intake has context.
+- If user wants triage, set the config. Don't refuse or ask for data.
+- Be conversational, helpful, and responsive.
 """,
-    tools=[],
+    tools=["load_data", "list_data_files", "get_current_time"],
 )
 
 # ---------------------------------------------------------------------------
-# Node 1: Intake (client-facing) -- config + dual-fetch + filter + stale
+# Node 1: Intake (ASYNC PIPELINE -- background, not client-facing)
 # ---------------------------------------------------------------------------
 intake_node = NodeSpec(
     id="intake",
     name="Intake",
     description=(
-        "Collect task config, dual-fetch ALL issues, filter, detect stale, "
-        "output the full issue queue for per-issue processing."
+        "Background: read triage config from shared memory, dual-fetch ALL issues, "
+        "filter, detect stale, output issue queue for per-issue processing."
     ),
     node_type="event_loop",
-    client_facing=True,
-    input_keys=["user_intent"],
+    max_node_visits=0,
+    input_keys=["triage_config"],
     output_keys=["issue_queue", "triage_results"],
     nullable_output_keys=["issue_queue", "triage_results"],
     system_prompt="""\
-You are the intake node for the Issue Triage Agent.
+You are the intake node for the Issue Triage Agent. You run in the BACKGROUND.
 
-Your input is user_intent -- the user's original request (e.g. "triage last 24 hours",
-"how many issues in the past week", "check stale issues").
+Your input message contains triage_config as a JSON object set by the user
+via the generic node. Parse it to get: mode, lookback_hours, send_email.
 
-STEP 1 -- Extract config (DO NOT re-ask what the user already said):
+If triage_config is missing, empty, null, or just "Begin.", use defaults:
+  mode="triage", lookback_hours=24, send_email=true
 
-Parse user_intent to determine:
-- mode: "triage" (default) or "stale" (if they mention stale/inactive/zombie)
-- lookback_hours: convert timeframes to hours ("24 hours" -> 24, "7 days" -> 168,
-  "2 weeks" -> 336, "today" -> 24, "this week" -> 168). Default: 24
-- send_email: true by default, false only if user explicitly says no
-
-If user_intent already contains enough info, proceed IMMEDIATELY to Step 2.
-Only use ask_user() if the request is truly ambiguous (e.g. user just said "go"
-without specifying anything at all).
-
-STEP 2 -- Dual-fetch ALL issues (just DO IT, no asking):
+STEP 1 -- Dual-fetch ALL issues:
 
 Call get_current_time() first. Calculate: since = now - lookback_hours (ISO 8601).
 
 FETCH A -- Updated issues:
   github_list_issues(owner="adenhq", repo="hive", state="open",
     sort="updated", direction="desc", limit=100, page=1, since=<since>)
-  The response is {"success": true, "data": [...]}.
+  Response: {"success": true, "data": [...]}.
   Paginate (increment page) until data array has < 100 entries.
-  Collect all into updated_issues list.
 
 FETCH B -- Created issues:
   github_list_issues(owner="adenhq", repo="hive", state="open",
     sort="created", direction="desc", limit=100, page=1)
   Response: {"success": true, "data": [...]}.
   Keep only issues where created_at >= since. Stop when created_at < since.
-  Collect all into created_issues list.
 
-Merge updated_issues + created_issues. Deduplicate by issue number.
+Merge + deduplicate by issue number.
 Track: total_fetched, created_count, updated_only_count.
 
 FILTER: Remove entries where is_pull_request==true OR labels contain
 "invalid"/"wontfix"/"question"/"spam" OR state=="closed".
 Track skipped_count. Remaining = candidates.
 
-STEP 3 -- Stale detection:
+STEP 2 -- Stale detection:
   github_list_issues(owner="adenhq", repo="hive", assignee="*",
     state="open", sort="updated", direction="asc", limit=100)
   Keep issues where is_pull_request==false AND updated_at older than 14 days ago.
 
-STEP 4 -- Print summary and output:
+STEP 3 -- Save summary to file for the user to read:
+  save_data(filename="fetch_summary.txt", data=<formatted summary>):
+  "Fetch Summary for last {lookback_hours} hours:
+    Total found: {total_fetched}
+    Created: {created_count} | Updated: {updated_only_count}
+    Skipped: {skipped_count} | Candidates: {len(candidates)}
+    Issues: #{n1}, #{n2}, #{n3}, ...
+    Stale: {stale_count}"
 
-Tell the user:
-"Fetch Summary for last {lookback_hours} hours:
-  Total found: {total_fetched}
-  Created: {created_count} | Updated: {updated_only_count}
-  Skipped: {skipped_count} | Candidates: {len(candidates)}
-  Issues: #{n1}, #{n2}, #{n3}, ...
-  Stale: {stale_count}
-  Now analyzing each issue one-by-one..."
-
-List ALL issue numbers. Do NOT abbreviate.
+STEP 4 -- Output:
 
 IF candidates is empty:
   set_output("triage_results", <JSON string>):
   {"mode": "...", "all_issue_numbers": [], "fetch_summary": {...},
    "high_value_issues": [], "stale_issues": [...], "total_analyzed": 0,
    "total_skipped": N, "total_upserted": 0, "send_email": bool}
-  This skips the loop and goes directly to report.
 
 IF candidates is NOT empty:
   set_output("issue_queue", <JSON string>):
@@ -155,22 +176,21 @@ IF candidates is NOT empty:
    "high_value_issues": [],
    "total_analyzed": 0,
    "total_upserted": 0}
-  This starts the per-issue processing loop.
 
-For STALE mode only: set candidates=[], skip dual-fetch, go straight to stale
-detection, then output triage_results.
+For STALE mode only: skip dual-fetch, do stale detection, output triage_results.
 
 RULES:
-- NEVER ask "would you like to analyze?" -- always proceed automatically.
-- ALWAYS do BOTH fetches (Fetch A + Fetch B) for triage mode.
-- Paginate until done. Do not stop at page 1 if there are 100 results.
+- You are a background node. Do NOT use ask_user(). Do NOT ask questions.
+- ALWAYS do BOTH fetches (A + B) for triage mode.
+- Paginate until done.
 - Issue data is in the "data" array of the response.
+- Just do the work and call set_output.
 """,
-    tools=["github_list_issues", "get_current_time"],
+    tools=["github_list_issues", "get_current_time", "save_data"],
 )
 
 # ---------------------------------------------------------------------------
-# Node 2: Fetch -- ONE issue content enrichment (loop member)
+# Node 2: Fetch -- ONE issue content enrichment (ASYNC PIPELINE loop member)
 # ---------------------------------------------------------------------------
 fetch_node = NodeSpec(
     id="fetch",
@@ -221,7 +241,7 @@ RULES:
 - Process EXACTLY ONE issue. No more, no less.
 - If a tool call fails, note the error and continue with available data.
 - Do NOT touch ChromaDB. Do NOT score. Just fetch and set_output.
-- Do NOT ask the user anything. You are an internal node with no user access.
+- Do NOT ask the user anything. You are an internal background node.
 """,
     tools=[
         "github_get_issue",
@@ -232,7 +252,7 @@ RULES:
 )
 
 # ---------------------------------------------------------------------------
-# Node 3: Analyze -- ONE issue scoring (loop member)
+# Node 3: Analyze -- ONE issue scoring (ASYNC PIPELINE loop member)
 # ---------------------------------------------------------------------------
 analyze_node = NodeSpec(
     id="analyze",
@@ -280,13 +300,13 @@ RULES:
 - Process EXACTLY the one issue from enriched_issue.
 - Do NOT upsert to ChromaDB. The dump node does that.
 - Do NOT fabricate scores -- base them on search results.
-- Do NOT ask the user anything. You are an internal node.
+- Do NOT ask the user anything. You are an internal background node.
 """,
     tools=["vector_db_search"],
 )
 
 # ---------------------------------------------------------------------------
-# Node 4: Dump -- ONE issue ChromaDB upsert + loop control (loop member)
+# Node 4: Dump -- ONE issue ChromaDB upsert + loop control (ASYNC PIPELINE)
 # ---------------------------------------------------------------------------
 dump_node = NodeSpec(
     id="dump",
@@ -315,7 +335,12 @@ STEP 1 -- Upsert to ChromaDB:
       "created_at": scored_issue.created_at, "summary": scored_issue.summary}],
     collection_name="issue_knowledge_base")
 
-STEP 2 -- Update queue state. Modify issue_queue:
+STEP 2 -- Write progress to file:
+  append_data(filename="triage_progress.jsonl", data=<JSON line>):
+  {"number": N, "title": "...", "severity": "...", "novelty_score": N,
+   "impact_score": N, "is_high_value": bool, "summary": "..."}
+
+STEP 3 -- Update queue state. Modify issue_queue:
   - Append scored_issue.number to all_issue_numbers
   - If scored_issue.is_high_value: append to high_value_issues (include number,
     title, url, novelty_score, impact_score, severity, summary, reasoning,
@@ -324,7 +349,7 @@ STEP 2 -- Update queue state. Modify issue_queue:
   - Increment total_upserted by 1
   - Set current_index = current_index + 1
 
-STEP 3 -- Decide: loop or finish. Call set_output EXACTLY ONCE:
+STEP 4 -- Decide: loop or finish. Call set_output EXACTLY ONCE:
 
   IF current_index < len(candidates):
     set_output("issue_queue", <updated issue_queue JSON>)
@@ -340,42 +365,46 @@ STEP 3 -- Decide: loop or finish. Call set_output EXACTLY ONCE:
 
 RULES:
 - ALWAYS upsert. Every issue goes into ChromaDB.
+- ALWAYS write progress to triage_progress.jsonl.
 - Call set_output EXACTLY ONCE: either "issue_queue" (loop) or "triage_results" (done).
-- Do NOT ask the user anything. You are an internal node.
+- Do NOT ask the user anything. You are an internal background node.
 """,
-    tools=["vector_db_upsert"],
+    tools=["vector_db_upsert", "append_data"],
 )
 
 # ---------------------------------------------------------------------------
-# Node 5: Report (client-facing) -- email + summary
+# Node 5: Report (ASYNC PIPELINE -- background, not client-facing)
 # ---------------------------------------------------------------------------
 report_node = NodeSpec(
     id="report",
     name="Report",
     description=(
-        "Present triage results to user and send HTML email digest "
-        "matching the maintainer_service format."
+        "Background: generate triage report, save to file for generic node to read, "
+        "send HTML email digest. Does NOT block for user input."
     ),
     node_type="event_loop",
-    client_facing=True,
+    max_node_visits=0,
     input_keys=["triage_results"],
-    output_keys=["digest_status"],
+    output_keys=["last_triage_report"],
     system_prompt="""\
-You are the report node for the Issue Triage Agent.
+You are the report node for the Issue Triage Agent. You run in the BACKGROUND.
 
 Your input message contains triage_results as a JSON object.
 Parse it. It has: mode, all_issue_numbers, fetch_summary, high_value_issues,
 stale_issues, total_analyzed, total_upserted, send_email.
 
-STEP 1 -- Present results to the user (text, NO tool calls):
+STEP 1 -- Build the text report:
 
-For TRIAGE mode show this structure:
+For TRIAGE mode build this text:
 
-  Triage Summary
+  === Issue Triage Report ===
+  Generated: {current timestamp}
+
+  Triage Summary:
   - Issues analyzed: {total_analyzed}
   - Issues upserted to knowledge base: {total_upserted}
-  - High-value issues found: {count}
-  - Stale issues found: {count}
+  - High-value issues found: {len(high_value_issues)}
+  - Stale issues found: {len(stale_issues)}
 
   Fetch Breakdown:
   - Total issues found: {fetch_summary.total_fetched}
@@ -384,7 +413,6 @@ For TRIAGE mode show this structure:
   - Skipped (PRs/spam/closed): {fetch_summary.skipped_count}
 
   All issues found: #{n1}, #{n2}, #{n3}, ...
-  (list every number from all_issue_numbers)
 
   High-Value Issues (sorted by impact_score descending):
   For each:
@@ -396,12 +424,15 @@ For TRIAGE mode show this structure:
   Stale Issues (assigned but inactive 14+ days):
   For each: #{number}: {title} -- assigned to @{assignee}, last updated {updated_at}
 
-  If no high-value issues: "No high-value issues found in this time window."
+  If no high-value issues: "No high-value issues found."
   If no stale issues: "No stale issues found."
 
-For STALE mode: just list the stale issues with assignees and last update dates.
+For STALE mode: list stale issues with assignees and last update dates.
 
-STEP 2 -- Send email if send_email is true AND there are high_value or stale issues.
+STEP 2 -- Save the report:
+  save_data(filename="report.txt", data=<the full text report>)
+
+STEP 3 -- Send email if send_email is true AND there are high_value or stale issues.
 
 Build an HTML email. Group high-value issues by category based on labels:
 - Bugs: labels containing "bug" or "critical"
@@ -430,7 +461,7 @@ Use this HTML template:
     Skipped: {skipped_count} | High-value: {hv_count} | Stale: {stale_count}
   </div>
 
-  <!-- For EACH category with issues add a section header like: -->
+  <!-- For EACH category with issues add a section header -->
   <h2 style="color: #16213e; margin-top: 30px;">Bugs</h2>
 
   <!-- For EACH issue in the category: -->
@@ -462,7 +493,6 @@ Use this HTML template:
   <div style="background: #fff3cd; border: 2px solid #daa520; border-radius: 8px; padding: 20px; margin-top: 30px;">
     <h2 style="color: #856404; margin-top: 0;">STALLED: Inactive Assignees ({stale_count})</h2>
     <p style="color: #856404;">These issues are assigned but inactive for 14+ days.</p>
-    <!-- For each stale issue: -->
     <div style="background: white; padding: 12px; margin: 8px 0; border-radius: 6px; border-left: 3px solid #daa520;">
       <a href="{url}" style="color: #1a1a2e; text-decoration: none; font-weight: 600;">#{number}: {title}</a>
       <div style="color: #666; font-size: 13px; margin-top: 4px;">
@@ -487,20 +517,15 @@ Send the email:
     from_email=SMTP_USERNAME,
     provider="smtp")
 
-- "to" = NOTIFICATION_EMAIL env var value
-- "from_email" = SMTP_USERNAME env var value
-- "provider" = always "smtp"
-- "html" = the COMPLETE inline HTML string, NOT a file path
+STEP 4 -- Finalize:
+  set_output("last_triage_report", "report.txt")
 
-Do NOT use save_data or serve_file_to_user.
-
-STEP 3 -- Finalize:
-  set_output("digest_status", "sent") if email was sent
-  set_output("digest_status", "skipped") if no email requested or no results
-
-After setting output, ask the user if they want to do anything else.
+RULES:
+- You are a background node. Do NOT use ask_user(). Do NOT block for input.
+- ALWAYS save report.txt via save_data BEFORE sending email.
+- Generate report, save, email, set_output. Then you are done.
 """,
-    tools=["send_email"],
+    tools=["send_email", "save_data", "load_data", "get_current_time"],
 )
 
 __all__ = [
