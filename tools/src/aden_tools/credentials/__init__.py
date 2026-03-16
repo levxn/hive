@@ -69,6 +69,7 @@ from .bigquery import BIGQUERY_CREDENTIALS
 from .brevo import BREVO_CREDENTIALS
 from .browser import get_aden_auth_url, get_aden_setup_url, open_browser
 from .calcom import CALCOM_CREDENTIALS
+from .chroma import CHROMA_CREDENTIALS
 from .calendly import CALENDLY_CREDENTIALS
 from .cloudinary import CLOUDINARY_CREDENTIALS
 from .confluence import CONFLUENCE_CREDENTIALS
@@ -158,6 +159,7 @@ CREDENTIAL_SPECS = {
     **BREVO_CREDENTIALS,
     **CALCOM_CREDENTIALS,
     **CALENDLY_CREDENTIALS,
+    **CHROMA_CREDENTIALS,
     **CLOUDINARY_CREDENTIALS,
     **CONFLUENCE_CREDENTIALS,
     **DATABRICKS_CREDENTIALS,
@@ -250,6 +252,7 @@ __all__ = [
     "BREVO_CREDENTIALS",
     "CALCOM_CREDENTIALS",
     "CALENDLY_CREDENTIALS",
+    "CHROMA_CREDENTIALS",
     "CLOUDINARY_CREDENTIALS",
     "CONFLUENCE_CREDENTIALS",
     "DATABRICKS_CREDENTIALS",

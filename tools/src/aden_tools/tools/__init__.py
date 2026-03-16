@@ -44,6 +44,7 @@ from .brevo_tool import register_tools as register_brevo
 from .calcom_tool import register_tools as register_calcom
 from .calendar_tool import register_tools as register_calendar
 from .calendly_tool import register_tools as register_calendly
+from .chroma_tool import register_tools as register_chroma
 from .cloudinary_tool import register_tools as register_cloudinary
 from .confluence_tool import register_tools as register_confluence
 from .csv_tool import register_tools as register_csv
@@ -211,6 +212,7 @@ def _register_verified(
 
     # --- Credentials required ---
     register_web_search(mcp, credentials=credentials)
+    register_chroma(mcp, credentials=credentials)
     register_github(mcp, credentials=credentials)
     register_email(mcp, credentials=credentials)
     register_gmail(mcp, credentials=credentials)
@@ -248,6 +250,7 @@ def _register_unverified(
     register_brevo(mcp, credentials=credentials)
     register_bigquery(mcp, credentials=credentials)
     register_calcom(mcp, credentials=credentials)
+    register_chroma(mcp, credentials=credentials)
     register_razorpay(mcp, credentials=credentials)
     register_serpapi(mcp, credentials=credentials)
     register_vision(mcp, credentials=credentials)
