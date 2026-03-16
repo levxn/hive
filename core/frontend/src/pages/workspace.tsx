@@ -1168,7 +1168,6 @@ export default function Workspace() {
             agentType,
             displayName,
           );
-          isWorkerRunning = resumable?.status === "active";
         } catch {
           // Transcript fetch failed — not critical
         }
