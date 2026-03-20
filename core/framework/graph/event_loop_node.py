@@ -187,6 +187,10 @@ class LoopConfig:
     stall_similarity_threshold: float = 0.85
     max_context_tokens: int = 32_000
     store_prefix: str = ""
+    # When True (auto-set for large-context models), only spill results that actually
+    # exceed max_tool_result_chars.  Small results stay inline with no file annotation.
+    # Avoids data-dir clutter for providers like Gemini that have 1M-token contexts.
+    spillover_large_only: bool = False
 
     # Overflow margin for max_tool_calls_per_turn.  Tool calls are only
     # discarded when the count exceeds max_tool_calls_per_turn * (1 + margin).
@@ -3918,6 +3922,16 @@ class EventLoopNode(NodeProtocol):
 
         spill_dir = self._config.spillover_dir
         if spill_dir:
+            is_large = limit > 0 and len(result.content) > limit
+            # For large-context models, only spill when the result actually exceeds the
+            # limit.  Small results stay inline with no file and no counter increment.
+            if not is_large and self._config.spillover_large_only:
+                return ToolResult(
+                    tool_use_id=result.tool_use_id,
+                    content=result.content,
+                    is_error=False,
+                )
+
             spill_path = Path(spill_dir)
             spill_path.mkdir(parents=True, exist_ok=True)
             filename = self._next_spill_filename(tool_name)
@@ -3934,7 +3948,7 @@ class EventLoopNode(NodeProtocol):
 
             (spill_path / filename).write_text(write_content, encoding="utf-8")
 
-            if limit > 0 and len(result.content) > limit:
+            if is_large:
                 # Large result: build a small, metadata-rich preview so the
                 # LLM cannot mistake it for the complete dataset.
                 PREVIEW_CAP = 5000
@@ -3973,7 +3987,7 @@ class EventLoopNode(NodeProtocol):
                     filename,
                 )
             else:
-                # Small result: keep full content + annotation
+                # Small result on a small-context model: keep full content + annotation
                 content = f"{result.content}\n\n[Saved to '{filename}']"
                 logger.info(
                     "Tool result saved to file: %s (%d chars → %s)",

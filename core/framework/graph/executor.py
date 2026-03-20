@@ -1971,6 +1971,10 @@ class GraphExecutor:
 
             lc = self._loop_config
             default_max_iter = 100 if node_spec.client_facing else 50
+            max_ctx = lc.get("max_context_tokens", _default_max_context_tokens())
+            # Auto-enable for large-context models (>=500K tokens, e.g. Gemini 1M).
+            # Small results stay inline — no clutter files in data/.
+            spillover_large_only = lc.get("spillover_large_only", max_ctx >= 500_000)
             node = EventLoopNode(
                 event_bus=self._event_bus,
                 judge=None,  # implicit judge: accept when output_keys are filled
@@ -1979,9 +1983,10 @@ class GraphExecutor:
                     max_tool_calls_per_turn=lc.get("max_tool_calls_per_turn", 30),
                     tool_call_overflow_margin=lc.get("tool_call_overflow_margin", 0.5),
                     stall_detection_threshold=lc.get("stall_detection_threshold", 3),
-                    max_context_tokens=lc.get("max_context_tokens", _default_max_context_tokens()),
+                    max_context_tokens=max_ctx,
                     max_tool_result_chars=lc.get("max_tool_result_chars", 30_000),
                     spillover_dir=spillover,
+                    spillover_large_only=spillover_large_only,
                     hooks=lc.get("hooks", {}),
                 ),
                 tool_executor=self.tool_executor,
